@@ -14,6 +14,15 @@ CONFIG      := release
 BUILT_BIN    = $(shell swift build -c $(CONFIG) --show-bin-path)/$(APP_NAME)
 INSTALL_DIR := /Applications
 
+# The backend address the app talks to is deployment-specific, so it is not in the repo
+# (2026-09-23): `make bundle` reads the web app's domain from SSM Parameter Store and stamps
+# https://<domain> into Info.plist as RSTRemoteEndpoint (RemoteClient.productionEndpoint). It
+# needs the admin AWS profile signed in (`aws sso login --profile admin`). Pass
+# REMOTE_ENDPOINT=https://... to bundle against another backend without AWS.
+REMOTE_ENDPOINT    ?=
+REMOTE_AWS_PROFILE ?= admin
+REMOTE_DOMAIN_PARAM := /real-screen-time/custom-domain-name
+
 # The version stamped into the bundle plist, read from the one constant in RSTCore so the
 # assembled app can never disagree with the code (DESIGN §2.1). Lazy (`=`) so only `bundle`
 # pays the grep, matching BUILT_BIN above. Extracts the quoted value from the line
@@ -52,7 +61,7 @@ TEST_FLAGS     := -Xswiftc -F -Xswiftc $(CLT_FRAMEWORKS) \
 # is nothing to strip. The ✔/✘ marks are UTF-8 glyphs, not colour codes.
 TEST_QUIET     := -q
 
-.PHONY: all build test seatbelt watchdog bundle release install clean
+.PHONY: all build test server-test seatbelt watchdog ui-gate bundle release install clean
 
 all: build
 
@@ -61,6 +70,19 @@ build:
 
 test:
 	swift test $(TEST_FLAGS) $(TEST_QUIET)
+
+## The backend suite (plan remote-grant, DESIGN §4/§5). A separate toolchain from the Swift
+## app: vitest under server/, headless, no AWS. Colour is forced off in the command itself:
+## NO_COLOR=1 is what actually holds, because `npm` re-injects FORCE_COLOR for the script it
+## runs and would override a bare FORCE_COLOR=0 (verified 2026-09-22 — the run came out
+## coloured); NO_COLOR is respected by vitest's colour library and npm leaves it alone. The
+## `test` script is `vitest run`, so the suite exits with a code instead of watching. The
+## default reporter gives one summary line per file on green and full detail on any failure.
+## `npm --silent` drops npm's own banner and the noisy "npm ERR!" epilogue on a failing run,
+## leaving just vitest's output. Turn per-test detail back on with
+## `npm test -- --reporter=verbose` (see server/README.md).
+server-test:
+	cd server && NO_COLOR=1 FORCE_COLOR=0 npm test --silent
 
 ## Prove the cover's release works — without ever putting a cover up.
 ##
@@ -147,6 +169,24 @@ watchdog: build
 	echo "watchdog: exited after $$waited s, threshold $(WATCHDOG_SECONDS) s — ok"; \
 	echo "  $$line"
 
+## Tier 2 — the real-click gate (plan headed-and-e2e-tests, T07).
+##
+## Builds the app and the driver, then runs the driver against a boxed, enforcing, seatbelted
+## launch with a scratch RST_DATA_DIR the driver creates per scenario. It drives the real
+## launched app's cover with genuine clicks and keystrokes through the Accessibility system and
+## asserts from events.jsonl — the one thing `make test`'s in-memory Tier 1 suite cannot reach.
+##
+## NOT part of `make test`: it needs a one-time Accessibility grant and drives a real (boxed)
+## window. On the first run the driver is untrusted; it prints exactly which binary to grant and
+## exits without launching anything. Grant that binary in System Settings, then run this again.
+##
+## A debug build on purpose: it is faster to build and the driver forces RST_ENFORCE=1, so debug
+## still covers. Box mode (RST_COVER_FRAME, set by the driver) withholds the kiosk lockdown, so
+## this can never lock the machine; RST_MAX_COVER_SECONDS is the backstop if a click misses.
+ui-gate: build
+	@bin="$$(swift build --show-bin-path)"; \
+	"$$bin/RSTUIDriver" "$$bin/$(APP_NAME)"
+
 ## Assemble dist/RealScreenTime.app by hand and ad-hoc sign it.
 ## Release configuration on purpose: the installed app enforces by default, while
 ## `swift run` (debug) observes. See CLAUDE.md, "Enforcement is opt-in in debug builds".
@@ -159,6 +199,16 @@ bundle:
 	# constant, so the shipped app's CFBundleShortVersionString always matches the code.
 	@test -n "$(APP_VERSION)" || { echo "could not read AppVersion.current"; exit 1; }
 	plutil -replace CFBundleShortVersionString -string "$(APP_VERSION)" $(CONTENTS)/Info.plist
+	@endpoint="$(REMOTE_ENDPOINT)"; \
+	if [ -z "$$endpoint" ]; then \
+	  domain=$$(aws ssm get-parameter --profile $(REMOTE_AWS_PROFILE) --region eu-central-1 \
+	    --name $(REMOTE_DOMAIN_PARAM) --query Parameter.Value --output text) || { \
+	    echo "make bundle: could not read $(REMOTE_DOMAIN_PARAM) from Parameter Store."; \
+	    echo "Sign in first: aws sso login --profile $(REMOTE_AWS_PROFILE)"; exit 1; }; \
+	  endpoint="https://$$domain"; \
+	fi; \
+	plutil -insert RSTRemoteEndpoint -string "$$endpoint" $(CONTENTS)/Info.plist; \
+	echo "backend endpoint: $$endpoint"
 	cp $(BUILT_BIN) $(CONTENTS)/MacOS/$(APP_NAME)
 	# Copy the tree, then drop the plist that belongs one level up in Contents/. A
 	# `find -exec cp` would flatten any subdirectory — fine today with one file in there,

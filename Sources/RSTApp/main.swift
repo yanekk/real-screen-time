@@ -349,6 +349,52 @@ menuBar.onPINAction = { [weak controller] action in
     }
 }
 
+// MARK: - Remote pairing (DESIGN §2.4, T06)
+
+// The endpoint the parent's Mac talks to. Fixed at bundle time, not a field the parent types: one
+// family has one deployed backend (§8). `make bundle` stamps it into Info.plist from Parameter
+// Store (RemoteClient.productionEndpoint); `RST_REMOTE_ENDPOINT` overrides it for `swift run` and
+// scratch servers (DESIGN §5.2). Empty and unset, a pair attempt fails closed.
+let remotePairingEndpoint = flags.remoteEndpointOverride ?? RemoteClient.productionEndpoint
+
+// **The T04 seam, now connected (T11).** The poller raises `AppController.remoteTokenRejected` on a
+// 401, and Settings reads it here to show "re-pair" instead of "Paired". The flag lives on
+// `controller` because it outlives any one poller and is not persisted (a fresh launch re-checks
+// against the server). A successful pair clears it — through `configureRemotePoller` on the rebuild
+// below, and again through this closure, which `RemotePairing.pair` calls after it stores the token.
+let remoteTokenRejected: () -> Bool = { controller.remoteTokenRejected }
+let clearRemoteTokenRejected: () -> Void = { controller.remoteTokenRejected = false }
+
+// The Mac side of pairing (T05), wired to this file's config + commit path. `commitConfig` writes
+// atomically, logs the change and re-ticks; `Config.changes(to:)` now reports the remote fields
+// (T06) so a redeemed token actually persists rather than being skipped as "no change".
+let remotePairing = RemotePairing(
+    config: { engine.config },
+    client: { endpoint in
+        // An unresolvable endpoint (none configured yet) becomes a sentinel host so a pair
+        // attempt fails closed rather than crashing on a force-unwrapped `URL`.
+        let url = RemoteClient.baseURL(configEndpoint: endpoint, override: nil)
+            ?? URL(string: "https://unpaired.invalid")!
+        return RemoteClient(session: .shared, baseURL: url)
+    },
+    commitConfig: { updated in
+        _ = commitConfig(updated)
+        // A pair/unpair just moved the endpoint and token, so rebuild the live poller against the
+        // new pairing — or tear it down on unpair — without a relaunch (T11). Keeping the rebuild
+        // here, in the same closure that writes the config, is the "config write and rebuild in one
+        // place" DESIGN §3.2 asks for; `engine.config` is the config `commitConfig` just persisted,
+        // so the assembly sees the redeemed token rather than the pre-pair one.
+        controller.configureRemotePoller(config: engine.config,
+                                         endpointOverride: flags.remoteEndpointOverride)
+    },
+    clearTokenRejected: clearRemoteTokenRejected)
+
+// Turn the channel on now if this launch is already paired (DESIGN §3.2). Unpaired, it installs
+// nothing and the tick's remote line stays dormant until the first pair rebuilds it through the
+// `commitConfig` closure above.
+controller.configureRemotePoller(config: engine.config,
+                                 endpointOverride: flags.remoteEndpointOverride)
+
 // MARK: - Settings
 
 /// **Every setting that exists, behind the PIN** (T17).
@@ -385,7 +431,17 @@ menuBar.onPINAction = { [weak controller] action in
             },
             // The window must not put the activation policy back to `.accessory` while the
             // kiosk owns it (T12) — a session can expire while Settings is open.
-            isCovering: { kiosk.isCovering }),
+            isCovering: { kiosk.isCovering },
+            // Remote pairing (DESIGN §2.4, T06). Status folds the live token-rejected flag; pair
+            // redeems the typed code against the build-constant endpoint; unpair clears it.
+            remotePairingStatus: { remotePairing.status(engine.config, tokenRejected: remoteTokenRejected()) },
+            pairRemote: { code in
+                switch await remotePairing.pair(endpoint: remotePairingEndpoint, code: code) {
+                case .success: return nil
+                case .failure(let error): return error
+                }
+            },
+            unpairRemote: { remotePairing.unpair() }),
         clock: clock,
         diagnostics: diagnostics)
 }

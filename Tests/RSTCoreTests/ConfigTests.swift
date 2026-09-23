@@ -265,6 +265,119 @@ struct ConfigTests {
         #expect(config.pinSaltData == salt)
     }
 
+    // MARK: - The remote channel
+
+    @Test("the shipped remote defaults are the ones the design specifies, and unpaired")
+    func remoteDefaults() {
+        // DESIGN §3.5: a fresh install has no backend and no token, so it is not paired and
+        // the poller has intervals to fall back on the moment pairing does happen.
+        let config = Config()
+        #expect(config.remoteEndpoint.isEmpty)
+        #expect(config.remoteDeviceToken.isEmpty)
+        #expect(config.remotePollFastSeconds == 4)
+        #expect(config.remotePollSlowSeconds == 45)
+        #expect(config.remoteGrantTTLSeconds == 900)
+        #expect(!config.isRemotePaired)
+    }
+
+    @Test("an endpoint and a token together mean paired")
+    func pairedNeedsBoth() {
+        var config = Config()
+        config.remoteEndpoint = "https://api.example.com"
+        config.remoteDeviceToken = "tok_abc"
+        #expect(config.isRemotePaired)
+    }
+
+    @Test("either half of the pairing alone is not paired")
+    func halfPairingIsNotPaired() {
+        var endpointOnly = Config()
+        endpointOnly.remoteEndpoint = "https://api.example.com"
+        #expect(!endpointOnly.isRemotePaired)
+
+        var tokenOnly = Config()
+        tokenOnly.remoteDeviceToken = "tok_abc"
+        #expect(!tokenOnly.isRemotePaired)
+    }
+
+    @Test("the remote fields round-trip through a save and load")
+    func remoteRoundTrip() throws {
+        try withTemporaryDirectory { directory in
+            let store = ConfigStore(directory: directory)
+            var config = Config()
+            config.remoteEndpoint = "https://api.example.com/prod"
+            config.remoteDeviceToken = "tok_deadbeef"
+            config.remotePollFastSeconds = 3
+            config.remotePollSlowSeconds = 60
+            config.remoteGrantTTLSeconds = 1200
+
+            try store.save(config)
+            let loaded = store.load()
+
+            #expect(loaded.config == config)
+            #expect(loaded.config.isRemotePaired)
+        }
+    }
+
+    @Test("the remote keys are snake_case on disk")
+    func remoteWireFormat() throws {
+        try withTemporaryDirectory { directory in
+            let store = ConfigStore(directory: directory)
+            var config = Config()
+            config.remoteEndpoint = "https://api.example.com"
+            config.remoteDeviceToken = "tok_abc"
+            try store.save(config)
+            let text = try String(contentsOf: store.url, encoding: .utf8)
+            #expect(text.contains("\"remote_endpoint\""))
+            #expect(text.contains("\"remote_device_token\""))
+            #expect(text.contains("\"remote_poll_fast_seconds\""))
+            #expect(text.contains("\"remote_poll_slow_seconds\""))
+            #expect(text.contains("\"remote_grant_ttl_seconds\""))
+            #expect(!text.contains("\"remoteEndpoint\""))
+        }
+    }
+
+    @Test("a file with no remote keys defaults them and stays unpaired")
+    func remoteKeysAbsentDefault() throws {
+        try withTemporaryDirectory { directory in
+            let store = ConfigStore(directory: directory)
+            // A config written before the remote channel existed. Not corruption.
+            try Data(#"{"session_minutes": 30, "pin_hash": "abc"}"#.utf8).write(to: store.url)
+
+            let loaded = store.load()
+            #expect(loaded.outcome == .loaded)
+            #expect(loaded.config.remoteEndpoint.isEmpty)
+            #expect(loaded.config.remotePollFastSeconds == 4)
+            #expect(loaded.config.remoteGrantTTLSeconds == 900)
+            #expect(!loaded.config.isRemotePaired)
+        }
+    }
+
+    /// The intervals and TTL are hand-editable with nothing validating them (T03 finding), so
+    /// zero or negative is one edit away. The raw field is preserved — it round-trips — but the
+    /// interval accessors floor it, because a zero poll interval spins and a zero TTL expires
+    /// every grant on arrival.
+    @Test("zero and negative intervals clamp to a one-second floor")
+    func intervalsClampToFloor() {
+        var config = Config()
+        config.remotePollFastSeconds = 0
+        config.remotePollSlowSeconds = -30
+        config.remoteGrantTTLSeconds = -1
+        #expect(config.remotePollFastInterval == 1)
+        #expect(config.remotePollSlowInterval == 1)
+        #expect(config.remoteGrantTTLInterval == 1)
+        // The raw fields are untouched: the floor is applied on read, not on store.
+        #expect(config.remotePollFastSeconds == 0)
+        #expect(config.remotePollSlowSeconds == -30)
+    }
+
+    @Test("sane intervals pass through the accessors unchanged")
+    func saneIntervalsPassThrough() {
+        let config = Config()   // 4 / 45 / 900
+        #expect(config.remotePollFastInterval == 4)
+        #expect(config.remotePollSlowInterval == 45)
+        #expect(config.remoteGrantTTLInterval == 900)
+    }
+
     // MARK: - Helpers
 
     /// A fresh directory per test, removed afterwards. Nothing here may touch the real

@@ -279,6 +279,102 @@ struct GrantTests {
         }
     }
 
+    // MARK: - Remote grants (T04)
+
+    /// The remote door adds the same minutes the PIN door does, records the dedupe id in the
+    /// same object, and marks its `extended` line `source:"remote"` — the one thing that tells
+    /// a parent reading the log a remote grant from one typed at the Mac.
+    @Test("applyRemoteGrant adds the minutes, records the id, and marks the log remote")
+    func remoteGrantAppliesAndMarksTheLog() {
+        let day = Calendar.warsaw
+        let h = Harness(start: day.wall(2026, 8, 21, 19, 0, 0))
+        h.launch(bootTime: day.wall(2026, 8, 21, 18, 0, 0))
+        h.tick()
+
+        h.engine.applyRemoteGrant(id: "g1", minutes: 15, at: h.now, announce: true)
+
+        #expect(h.remaining == 15 * 60)
+        #expect(h.engine.state.appliedRemoteGrants["g1"] == h.now)
+        #expect(h.events.last == Event(.extended, at: h.now,
+                                       [.minutes: 15, .countToday: 0, .source: "remote"]))
+        // On-console, so the grant is spoken exactly as the PIN grant is (§2.6).
+        #expect(h.enforcer.announced.contains { if case .granted(15) = $0.announcement { return true }; return false })
+    }
+
+    /// **Off-console suppresses the chime** (DESIGN §2.6). The minutes land and the line is
+    /// still written — what happened is a fact about the evening — but nothing is spoken over
+    /// whoever the parent switched in to.
+    @Test("a remote grant applied off-console adds the minutes and logs them but does not speak")
+    func remoteGrantOffConsoleIsSilent() {
+        let day = Calendar.warsaw
+        let h = Harness(start: day.wall(2026, 8, 21, 19, 0, 0))
+        h.launch(bootTime: day.wall(2026, 8, 21, 18, 0, 0))
+        h.tick()
+
+        h.engine.applyRemoteGrant(id: "g2", minutes: 30, at: h.now, announce: false)
+
+        #expect(h.remaining == 30 * 60)
+        #expect(h.engine.state.appliedRemoteGrants["g2"] == h.now)
+        #expect(h.events.last == Event(.extended, at: h.now,
+                                       [.minutes: 30, .countToday: 0, .source: "remote"]))
+        // Nothing spoken: no grant announcement at all.
+        #expect(!h.enforcer.announced.contains { if case .granted = $0.announcement { return true }; return false })
+    }
+
+    /// The `announce` flag reaches the PIN door too, so a caller that wants the minutes without
+    /// the chime has one — and its default keeps every existing call site speaking.
+    @Test("extend(announce: false) applies without speaking, and no source field is written")
+    func extendCanSuppressTheChime() {
+        let day = Calendar.warsaw
+        let h = Harness(start: day.wall(2026, 8, 21, 19, 0, 0))
+        h.launch(bootTime: day.wall(2026, 8, 21, 18, 0, 0))
+        h.tick()
+
+        h.engine.extend(minutes: 15, at: h.now, announce: false)
+
+        #expect(h.remaining == 15 * 60)
+        // A local grant carries no `source` — byte-for-byte the line it has always been.
+        #expect(h.events.last == Event(.extended, at: h.now, [.minutes: 15, .countToday: 0]))
+        #expect(!h.enforcer.announced.contains { if case .granted = $0.announcement { return true }; return false })
+    }
+
+    /// A remote grant on an expired cover is the whole point of the feature: it lifts the cover
+    /// through the same path the PIN grant uses, so `decide` goes from `.expired` to `.allowed`.
+    @Test("a remote grant on an expired session allows again")
+    func remoteGrantLiftsTheExpiredCover() {
+        let day = Calendar.warsaw
+        let h = Harness(start: day.wall(2026, 8, 21, 19, 0, 0))
+        h.launch(bootTime: day.wall(2026, 8, 21, 18, 0, 0))
+        h.tick()
+        h.engine.startSelfService(at: h.now)
+        h.run(until: day.wall(2026, 8, 21, 19, 30, 1))
+        #expect(h.enforcer.calls.last?.decision == .expired(selfServiceLeft: 0))
+
+        h.engine.applyRemoteGrant(id: "g3", minutes: 15, at: h.now, announce: true)
+        h.run(until: day.wall(2026, 8, 21, 19, 30, 2))
+        #expect(h.enforcer.calls.last?.decision == .allowed(remaining: 899))
+        // A grant costs no self-service session, remote or local.
+        #expect(h.engine.state.sessionsUsedToday == 1)
+    }
+
+    /// A remote stand-down lift: a grant arriving during a PIN stand-down re-arms the app, the
+    /// same as a PIN grant does (§2.5) — the remote grant *is* a PIN grant.
+    @Test("a remote grant during a stand-down lifts it")
+    func remoteGrantLiftsAStandDown() {
+        let day = Calendar.warsaw
+        let h = Harness(start: day.wall(2026, 8, 22, 20, 0, 0))
+        h.launch(bootTime: day.wall(2026, 8, 22, 19, 0, 0))
+        h.tick()
+        h.engine.disable(at: h.now)
+        #expect(h.engine.state.disabledUntil != nil)
+
+        h.engine.applyRemoteGrant(id: "g4", minutes: 15, at: h.now, announce: true)
+        #expect(h.engine.state.disabledUntil == nil)
+        #expect(h.remaining == 15 * 60)
+        // The lift is recorded, so the parent's log shows the app came back on and when.
+        #expect(h.events.contains { $0.type == .rearmed })
+    }
+
     // MARK: - Wyłącz do jutra
 
     /// **The 05:30 case, which is the one that is wrong on the first attempt.**

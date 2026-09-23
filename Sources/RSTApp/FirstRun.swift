@@ -28,6 +28,34 @@ final class FirstRunWindow: NSObject, NSWindowDelegate {
 
     static var isShowing: Bool { showing != nil }
 
+    // MARK: - Tier 1 seam (DESIGN §3.1, T05)
+
+    /// **Build the wizard off-screen for the headed suite** — the entry point that passes
+    /// `present: false` (see the note on the designated initialiser). It does not register in
+    /// ``showing`` and takes no Dock icon, so the caller owns the returned object's lifetime
+    /// and nothing is ever ordered onto a display. `present`'s path is untouched.
+    static func buildForTesting(isConfigured: Bool,
+                                savedLimits: SessionLimits = .suggested,
+                                clock: any Clock,
+                                diagnostics: Diagnostics = .discarded,
+                                save: @escaping Save = { _ in nil },
+                                onClose: @escaping () -> Void = {}) -> FirstRunWindow {
+        FirstRunWindow(isConfigured: isConfigured, savedLimits: savedLimits, clock: clock,
+                       diagnostics: diagnostics, isCovering: { false }, save: save,
+                       onClose: onClose, present: false)
+    }
+
+    /// **Read access for the headed suite, and only that** — the same additive, read-only
+    /// reach the menu bar exposes (T04). The step, the three nav buttons and the PIN boxes are
+    /// all `private`, which `@testable` does not open, so a Tier 1 test cannot otherwise assert
+    /// the step machinery or type a PIN. These are the whole of the reach — the step, the two
+    /// buttons a headed test presses (`Continue`/`Install login item`/`Finish` and `Finish
+    /// without it`), and the PIN boxes; the app calls none of them and its behaviour is unchanged.
+    var testStep: FirstRunStep { step }
+    var testNextButton: NSButton { nextButton }
+    var testAltButton: NSButton { altButton }
+    var testPINBoxes: PINBoxes { pinBoxes }
+
     private let window: NSWindow
     private let save: Save
     private let diagnostics: Diagnostics
@@ -121,13 +149,21 @@ final class FirstRunWindow: NSObject, NSWindowDelegate {
                                  save: save, onClose: onClose)
     }
 
+    /// `present: false` is the **build-but-do-not-show seam** (DESIGN §3.1, T05): it builds the
+    /// window and shows the entry step's controls, but runs none of the presenting tail — no
+    /// `center`, no ``takeDockIcon()`` (so the activation policy stays non-`.regular`, and the
+    /// wizard's step machinery is asserted without a Dock icon), no ordering. A headed test
+    /// builds one through ``buildForTesting(isConfigured:savedLimits:clock:diagnostics:save:onClose:)``,
+    /// drives its nav buttons and PIN boxes, and tears it down without a window reaching a
+    /// display. `present`'s path passes the default `true`, so the shipping behaviour is unchanged.
     private init(isConfigured: Bool,
                  savedLimits: SessionLimits,
                  clock: any Clock,
                  diagnostics: Diagnostics,
                  isCovering: @escaping () -> Bool,
                  save: @escaping Save,
-                 onClose: @escaping () -> Void) {
+                 onClose: @escaping () -> Void,
+                 present: Bool = true) {
         entryStep = firstRunEntryStep(isConfigured: isConfigured)
         self.isCovering = isCovering
         self.clock = clock
@@ -153,15 +189,20 @@ final class FirstRunWindow: NSObject, NSWindowDelegate {
         buildChrome()
         show(entryStep)
 
-        window.center()
-        takeDockIcon()
-        NSApp.activate()
-        window.makeKeyAndOrderFront(nil)
-        // **After `makeKeyAndOrderFront`, not instead of it.** A background agent is not
-        // always granted activation, and an ordinary order-front from an app the system has
-        // decided is not active can be dropped; this one cannot. See ``takeDockIcon()`` for
-        // what went wrong without it.
-        window.orderFrontRegardless()
+        // The presenting tail, skipped by the seam (see the `present` note on `init`). Made
+        // conditional rather than an early `return`, per CLAUDE.md — it is all and only the
+        // calls that touch a display or the app-global activation policy.
+        if present {
+            window.center()
+            takeDockIcon()
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
+            // **After `makeKeyAndOrderFront`, not instead of it.** A background agent is not
+            // always granted activation, and an ordinary order-front from an app the system has
+            // decided is not active can be dropped; this one cannot. See ``takeDockIcon()`` for
+            // what went wrong without it.
+            window.orderFrontRegardless()
+        }
 
         diagnostics(entryStep == .welcome
                     ? "first run: no PIN configured, wizard opened"

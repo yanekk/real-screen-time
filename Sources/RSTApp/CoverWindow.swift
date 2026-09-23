@@ -147,6 +147,11 @@ final class CoverContentView: NSView {
     private func button(_ kind: CoverModel.Button) -> NSButton {
         let button = NSButton(title: title(for: kind), target: self, action: #selector(pressed(_:)))
         button.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
+        // The `NSUserInterfaceItemIdentifier` above is read by `pressed(_:)` to resolve the
+        // kind, but AppKit does not surface it to the Accessibility system — an external
+        // driver cannot see it (T00 finding). This is the same name again, set the one way a
+        // cross-process `AXUIElement` reader can find (T06); T07 is the gate that uses it.
+        button.setAccessibilityIdentifier(kind.rawValue)
         button.bezelStyle = .rounded
         button.controlSize = .large
         button.font = .systemFont(ofSize: 18 * scale, weight: .medium)

@@ -177,4 +177,18 @@ final class MenuBarController {
         diagnostics("menu: \(action.rawValue) — PIN prompt", at: clock.now)
         onPINAction?(action)
     }
+
+    // MARK: - Tier 1 seam (DESIGN §3.1, T04)
+
+    /// **Read access for the headed suite, and only that.** The menu bar orders no window,
+    /// so unlike the cover (`buildWindows`) or Settings (`present`) it needs no
+    /// build-but-do-not-show seam — nothing here can put a window on a display or lock the
+    /// machine down, so there is nothing to route around, only state to see. A Tier 1 test
+    /// still has to reach what `init` and ``update(_:)`` produced — the status button's title
+    /// and symbol, and the menu's gated items — and every one of those is `private`, which
+    /// `@testable` does not open. These two accessors are the whole of the reach: both
+    /// `internal`, both read-only, additive over the shipping members. The app itself calls
+    /// neither and its behaviour is unchanged.
+    var statusButton: NSStatusBarButton? { statusItem.button }
+    var menuItems: [NSMenuItem] { statusItem.menu?.items ?? [] }
 }

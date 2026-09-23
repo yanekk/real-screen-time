@@ -455,6 +455,28 @@ struct SettingsModelTests {
         #expect(Config().changes(to: Config()).isEmpty)
     }
 
+    /// **The remote fields have to move the log, or a pairing never persists** (T06).
+    /// `commitConfig` (main.swift) skips the write when `changes(to:)` is empty, so a redeemed
+    /// token that this did not report would be silently dropped. The endpoint prints as a URL;
+    /// the device token is masked like the PIN.
+    @Test("pairing is recorded, the endpoint by value and the token masked")
+    func remotePairingIsDescribed() {
+        var paired = Config()
+        paired.remoteEndpoint = "https://backend.test/prod"
+        paired.remoteDeviceToken = "device-token-abc"
+
+        let changes = Config().changes(to: paired)
+        #expect(changes.contains("remote_endpoint \"\"→https://backend.test/prod"))
+        #expect(changes.contains("remote_device_token changed"))
+        // The token value itself never reaches the log.
+        #expect(!changes.joined().contains("device-token-abc"))
+
+        // Unpair is a change too, so it also persists.
+        let unpaired = paired.changes(to: Config())
+        #expect(unpaired.contains("remote_endpoint https://backend.test/prod→\"\""))
+        #expect(unpaired.contains("remote_device_token changed"))
+    }
+
     /// **The PIN is never printed, in either direction.** `events.jsonl` is a plain file in
     /// the child's own home directory.
     @Test("a PIN change is recorded without the PIN")
@@ -466,6 +488,21 @@ struct SettingsModelTests {
         #expect(changes == ["pin_hash changed"])
         #expect(!changes.joined().contains("old"))
         #expect(!changes.joined().contains("new"))
+    }
+
+    // MARK: - The pairing code (DESIGN §2.4, T06)
+
+    @Test("a pairing code is trimmed, and blank or whitespace-only is nil")
+    func pairingCodeNormalization() {
+        #expect(PairingCode.normalized("ABC123") == "ABC123")
+        #expect(PairingCode.normalized("  ABC123  ") == "ABC123")
+        #expect(PairingCode.normalized("\tABC123\n") == "ABC123")
+        // Nothing to redeem.
+        #expect(PairingCode.normalized("") == nil)
+        #expect(PairingCode.normalized("   ") == nil)
+        #expect(PairingCode.normalized("\n\t ") == nil)
+        // Interior spacing is the backend's business, not trimmed away.
+        #expect(PairingCode.normalized("  AB CD  ") == "AB CD")
     }
 
     // MARK: - Changing the PIN

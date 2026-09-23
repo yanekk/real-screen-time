@@ -126,44 +126,59 @@ final class CoverController {
 
     // MARK: - Windows
 
-    private func build(_ model: CoverModel) {
-        layout = currentLayout()
-
-        // One window per display — or exactly one box at absolute coordinates under
-        // `RST_COVER_FRAME`, which is a rect in screen space and not a thing per screen.
+    /// **Build the cover's windows without putting any on a display** — the Tier 1 seam
+    /// (DESIGN §3.1, T02).
+    ///
+    /// One `CoverWindow` per display, or exactly one box at absolute coordinates under
+    /// `RST_COVER_FRAME`, which is a rect in screen space and not a thing per screen. Each is
+    /// rendered with `model` and handed back **unordered**: `show(_:)` owns the tail that
+    /// orders them and engages the kiosk, so a headed test can assert the window set, the
+    /// buttons and every string on them without a screen lighting up. The screen set is
+    /// passed in rather than read here, so a test's window count is deterministic —
+    /// `NSScreen.screens` works off-screen but is the real hardware (T00, FINDINGS), and
+    /// production hands it exactly that.
+    func buildWindows(_ model: CoverModel, screens: [NSScreen]) -> [CoverWindow] {
         let rects: [NSRect]
-        let keyIndex: Int
         if let frame {
             rects = [NSRect(x: CGFloat(frame.x), y: CGFloat(frame.y),
                             width: CGFloat(frame.width), height: CGFloat(frame.height))]
-            keyIndex = 0
         } else {
             // The whole `screen.frame`, menu bar and notch included: `visibleFrame` leaves
             // a strip at the top, and a strip is somewhere to click.
-            rects = NSScreen.screens.map(\.frame)
-            // The key window goes on the screen the keyboard is already pointing at. Every
-            // other display gets `orderFrontRegardless`, which shows a window without
-            // asking for key status — two windows fighting over the keyboard is a PIN field
-            // that sometimes takes keystrokes and sometimes does not.
-            keyIndex = NSScreen.screens.firstIndex(where: { $0 == NSScreen.main }) ?? 0
+            rects = screens.map(\.frame)
         }
-
-        for (index, rect) in rects.enumerated() {
+        return rects.map { rect in
             let window = makeWindow(rect)
-            let content = window.contentView as? CoverContentView
-            content?.render(model)
+            (window.contentView as? CoverContentView)?.render(model)
+            return window
+        }
+    }
 
+    private func build(_ model: CoverModel) {
+        layout = currentLayout()
+        let screens = NSScreen.screens
+        windows = buildWindows(model, screens: screens)
+
+        // The key window goes on the screen the keyboard is already pointing at. Every
+        // other display gets `orderFrontRegardless`, which shows a window without asking for
+        // key status — two windows fighting over the keyboard is a PIN field that sometimes
+        // takes keystrokes and sometimes does not. Under `RST_COVER_FRAME` there is one
+        // window and it is the key one.
+        let keyIndex = frame == nil
+            ? (screens.firstIndex(where: { $0 == NSScreen.main }) ?? 0)
+            : 0
+
+        for (index, window) in windows.enumerated() {
             if index == keyIndex {
                 window.makeKeyAndOrderFront(nil)
                 // `contentView` first, `makeKeyAndOrderFront` second, `makeFirstResponder`
                 // third. In any other order the focus lands nowhere at all.
-                if let responder = content?.initialResponder {
+                if let responder = (window.contentView as? CoverContentView)?.initialResponder {
                     window.makeFirstResponder(responder)
                 }
             } else {
                 window.orderFrontRegardless()
             }
-            windows.append(window)
         }
     }
 

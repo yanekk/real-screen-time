@@ -362,7 +362,7 @@ struct EventLogTests {
             .reason: "reason", .usedSeconds: "used_s", .remainingSeconds: "remaining_s",
             .threshold: "threshold", .voice: "voice", .name: "name", .forced: "forced",
             .by: "by", .until: "until", .backup: "backup", .coveredSeconds: "covered_s",
-            .changed: "changed",
+            .changed: "changed", .source: "source",
         ]
         // Every case is spoken for, so a field added without a spelling fails here.
         #expect(Set(documented.keys) == Set(Event.Field.allCases))

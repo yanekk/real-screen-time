@@ -95,6 +95,17 @@ public struct Flags: Equatable, Sendable {
     /// `RSTApp` turns this into a directory.
     public var dataDirectory: String?
 
+    /// `RST_REMOTE_ENDPOINT` — point the remote client at a local fake or scratch server so no
+    /// test or manual run reaches the real backend (DESIGN §5.2). `nil` when unset or invalid.
+    ///
+    /// Validated as an absolute `http`/`https` URL with a host and dropped otherwise, the same
+    /// judgement the rest of this file makes for a hand-typed value: a malformed endpoint that
+    /// silently did nothing would let a run believe it was hitting the scratch server while it
+    /// fell back to whatever `config.json` names. Kept as the string as typed rather than a
+    /// `URL` — `RemoteClient` resolves the effective base URL from this and `Config`, and doing
+    /// the precedence in one place (App) keeps this to grammar alone.
+    public var remoteEndpointOverride: String?
+
     /// What was ignored, and why — one line each, for `app.log`.
     ///
     /// A mistyped flag that silently does nothing is the worst outcome of the four
@@ -111,6 +122,7 @@ public struct Flags: Equatable, Sendable {
                 stallSeconds: TimeInterval? = nil,
                 timeScale: Double = 1,
                 dataDirectory: String? = nil,
+                remoteEndpointOverride: String? = nil,
                 warnings: [String] = []) {
         self.enforcing = enforcing
         self.maxCoverSeconds = maxCoverSeconds
@@ -121,6 +133,7 @@ public struct Flags: Equatable, Sendable {
         self.stallSeconds = stallSeconds
         self.timeScale = timeScale
         self.dataDirectory = dataDirectory
+        self.remoteEndpointOverride = remoteEndpointOverride
         self.warnings = warnings
     }
 
@@ -135,6 +148,7 @@ public struct Flags: Equatable, Sendable {
         public static let stallSeconds = "RST_STALL_SECONDS"
         public static let timeScale = "RST_TIME_SCALE"
         public static let dataDirectory = "RST_DATA_DIR"
+        public static let remoteEndpoint = "RST_REMOTE_ENDPOINT"
     }
 
     /// - Parameters:
@@ -243,6 +257,22 @@ public struct Flags: Equatable, Sendable {
             dataDirectory = nil
         }
 
+        // An absolute http(s) URL with a host, or nothing. A bare host, a `file:` path or a
+        // typo is dropped rather than passed on: the whole point of the override is to be sure
+        // a run is *not* touching the real backend, and a value that silently fails that would
+        // defeat it. `URL(string:)` is lenient, so the scheme and host are checked explicitly.
+        var remoteEndpointOverride: String?
+        if let text = environment[Name.remoteEndpoint] {
+            let trimmed = text.trimmingCharacters(in: .whitespaces)
+            if let url = URL(string: trimmed),
+               let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+               let host = url.host, !host.isEmpty {
+                remoteEndpointOverride = trimmed
+            } else {
+                warnings.append("\(Name.remoteEndpoint)=\(text) is not an http(s) URL with a host — ignored, using the configured endpoint")
+            }
+        }
+
         return Flags(enforcing: enforcing,
                      maxCoverSeconds: maxCoverSeconds,
                      coverFrame: coverFrame,
@@ -252,6 +282,7 @@ public struct Flags: Equatable, Sendable {
                      stallSeconds: stallSeconds,
                      timeScale: timeScale,
                      dataDirectory: dataDirectory,
+                     remoteEndpointOverride: remoteEndpointOverride,
                      warnings: warnings)
     }
 }

@@ -1,0 +1,25 @@
+{
+  // Type-checking config for the backend. Compilation for deploy is done by esbuild via
+  // SAM (see template.yaml, Metadata.BuildMethod: esbuild); tsc here only type-checks
+  // (`npm run typecheck`). vitest transpiles the tests itself and needs no build step.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2022"],
+    "types": ["node"],
+    // The web page ships as plain browser JS under web/; the tests import its pure helpers. allowJs
+    // lets tsc resolve that import for their inferred types, checkJs:false leaves the DOM-shaped
+    // body of app.js (window, document, google) unchecked — it is browser code, not node.
+    "allowJs": true,
+    "checkJs": false,
+    "strict": true,
+    "noImplicitOverride": true,
+    "noUncheckedIndexedAccess": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

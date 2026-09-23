@@ -51,6 +51,19 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         /// The cover is up. The window can be open underneath one — a session can expire
         /// while a parent is reading it — and the activation policy is then the kiosk's.
         let isCovering: () -> Bool
+
+        // MARK: Remote pairing (DESIGN §2.4, T06)
+
+        /// The live pairing state for the status line. Read on open, after a pair or unpair, and
+        /// on every ``refreshPairingStatus()`` tick — so a token rejected by the poller (T04)
+        /// while this window sits open flips the line to "re-pair" without a reopen.
+        let remotePairingStatus: () -> PairingStatus
+        /// Redeem a typed pairing code. `nil` on success; the ``RemoteClientError`` otherwise,
+        /// which the window turns into an English sentence. Async because it is a network
+        /// round-trip — the window kicks it off and does not block (Settings is not modal).
+        let pairRemote: (String) async -> RemoteClientError?
+        /// Disconnect this Mac locally — clear the stored token and endpoint (DESIGN §2.4).
+        let unpairRemote: () -> Void
     }
 
     /// The one on screen, if any. Static because the menu item can be chosen again while a
@@ -120,6 +133,24 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     private let updateButton = NSButton()
     private let updateStatusLabel = SettingsWindow.label(size: 12, weight: .regular)
 
+    /// The remote-pairing controls (DESIGN §2.4, T06). The status line reads the three
+    /// ``PairingStatus`` states; the code field and `Pair` redeem a code; `Unpair` clears a
+    /// stored token and is enabled only when paired; the note carries the outcome in English.
+    private let pairingStatusValueLabel = SettingsWindow.label(size: 13, weight: .regular)
+    private let pairingCodeField = NSTextField()
+    private let pairButton = NSButton()
+    private let unpairButton = NSButton()
+    /// The whole "Pairing code" row — label, field and `Pair`. Hidden as one unit, so a paired Mac
+    /// shows no orphaned "Pairing code" label beside an empty gap (2026-09-23).
+    private var pairingCodeRow: NSView?
+    private let pairingNoteLabel = SettingsWindow.label(size: 12, weight: .regular)
+
+    /// Refreshes the status line once a second while the window is up, so a 401 the poller (T04)
+    /// raises against an open Settings window shows as "re-pair" without a reopen. Started only on
+    /// the presenting path; a headed test drives ``refreshPairingStatus()`` directly instead
+    /// (DESIGN §3.1). Invalidated on close.
+    private var pairingStatusTimer: Timer?
+
     // MARK: - Presenting
 
     /// Put the window on the screen. A second call while one is up brings the first forward
@@ -140,7 +171,51 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 
     static var isShowing: Bool { showing != nil }
 
-    private init(host: Host, clock: any Clock, diagnostics: Diagnostics) {
+    // MARK: - Tier 1 seam (DESIGN §3.1, T05)
+
+    /// **Build the window off-screen for the headed suite** — the entry point that passes
+    /// `present: false` (see the note on ``init(host:clock:diagnostics:present:)``). It does not
+    /// register in ``showing`` and takes no Dock icon, so the caller owns the returned object's
+    /// lifetime and nothing is ever ordered onto a display. `present`'s path is untouched.
+    static func buildForTesting(host: Host, clock: any Clock,
+                                diagnostics: Diagnostics = .discarded) -> SettingsWindow {
+        SettingsWindow(host: host, clock: clock, diagnostics: diagnostics, present: false)
+    }
+
+    /// **Read access for the headed suite, and only that** — the same additive, read-only
+    /// reach the menu bar exposes (T04). Every control the window builds is `private`, which
+    /// `@testable` does not open, so a Tier 1 test cannot otherwise see what ``fill()`` put on
+    /// screen or drive ``savePressed()`` through the real button. These three are the whole of
+    /// it; the app calls none of them and its behaviour is unchanged.
+    ///
+    /// The controls are keyed by ``SettingsField`` — ``focusTargets`` plus the pop-up, which
+    /// has no focus target because it cannot hold an invalid value.
+    var testControls: [SettingsField: NSView] {
+        focusTargets.merging([.selfServiceSessionsPerDay: sessionsPerDayPopUp]) { existing, _ in existing }
+    }
+    var testSaveButton: NSButton { saveButton }
+    var testWindow: NSWindow { window }
+
+    /// **Read access to the pairing controls for the headed suite, and only that** (DESIGN §3.1,
+    /// T06). Same additive, read-only reach as the controls above. ``testPair()`` runs the exact
+    /// async work the `Pair` button kicks off — validate, call the host, render, refresh — so a
+    /// synchronous headed test can `await` it and assert the outcome without pumping a run loop.
+    var testPairingStatusLabel: NSTextField { pairingStatusValueLabel }
+    var testPairingCodeField: NSTextField { pairingCodeField }
+    var testPairButton: NSButton { pairButton }
+    var testUnpairButton: NSButton { unpairButton }
+    var testPairingCodeRow: NSView? { pairingCodeRow }
+    var testPairingNoteLabel: NSTextField { pairingNoteLabel }
+    func testRefreshPairingStatus() { refreshPairingStatus() }
+    func testPair() async { await performPair() }
+
+    /// `present: false` is the **build-but-do-not-show seam** (DESIGN §3.1, T05): it builds the
+    /// window, its controls and fills them from the config, but runs none of the presenting
+    /// tail — no `center`, no ``takeDockIcon()`` (so the activation policy stays non-`.regular`),
+    /// no ordering. A headed test builds one through ``buildForTesting(host:clock:diagnostics:)``,
+    /// queries and drives its controls, and tears it down without a window reaching a display.
+    /// `present`'s own path passes the default `true`, so the shipping behaviour is unchanged.
+    private init(host: Host, clock: any Clock, diagnostics: Diagnostics, present: Bool = true) {
         self.host = host
         self.clock = clock
         self.diagnostics = diagnostics
@@ -169,25 +244,35 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         buildContent()
         fill()
 
-        window.center()
-        takeDockIcon()
-        NSApp.activate()
+        // The presenting tail, skipped by the seam (see the `present` note on `init`). Made
+        // conditional rather than an early `return`, per CLAUDE.md — it is all and only the
+        // calls that touch a display or the app-global activation policy.
+        if present {
+            window.center()
+            takeDockIcon()
+            NSApp.activate()
 
-        // **Three lines rather than one, because a window that does not appear is otherwise
-        // completely silent.** `NSApplication` swallows an exception raised inside an event
-        // handler (T00) and keeps its run loop going, so a failure anywhere in here leaves an
-        // app that is alive, has taken a Dock icon, and shows nothing — which is exactly what
-        // was seen by hand on 2026-08-27. These say which step was the last one reached.
-        diagnostics("settings: window built, ordering front", at: clock.now)
-        window.makeKeyAndOrderFront(nil)
-        // **After `makeKeyAndOrderFront`, not instead of it** — the wizard's finding of
-        // 2026-08-26: an order-front from an app the system has decided is not active can be
-        // dropped, and this one cannot.
-        window.orderFrontRegardless()
+            // Keep the pairing status line live while the window is up (T06). Only on the
+            // presenting path: a headed test builds through the seam and drives the refresh by
+            // hand, so no `Timer` runs under `make test`.
+            startPairingStatusTimer()
 
-        diagnostics("settings: opened, visible=\(window.isVisible), "
-                    + "frame=\(Int(window.frame.width))x\(Int(window.frame.height))"
-                    + "+\(Int(window.frame.minX))+\(Int(window.frame.minY))", at: clock.now)
+            // **Three lines rather than one, because a window that does not appear is otherwise
+            // completely silent.** `NSApplication` swallows an exception raised inside an event
+            // handler (T00) and keeps its run loop going, so a failure anywhere in here leaves an
+            // app that is alive, has taken a Dock icon, and shows nothing — which is exactly what
+            // was seen by hand on 2026-08-27. These say which step was the last one reached.
+            diagnostics("settings: window built, ordering front", at: clock.now)
+            window.makeKeyAndOrderFront(nil)
+            // **After `makeKeyAndOrderFront`, not instead of it** — the wizard's finding of
+            // 2026-08-26: an order-front from an app the system has decided is not active can be
+            // dropped, and this one cannot.
+            window.orderFrontRegardless()
+
+            diagnostics("settings: opened, visible=\(window.isVisible), "
+                        + "frame=\(Int(window.frame.width))x\(Int(window.frame.height))"
+                        + "+\(Int(window.frame.minX))+\(Int(window.frame.minY))", at: clock.now)
+        }
     }
 
     /// **A real window needs a real app.** `Info.plist` sets `LSUIElement`, so the app runs
@@ -277,6 +362,40 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         add([Self.sectionTitle("Security")])
         add([buttonRow([button("Change PIN…", #selector(changePINPressed))]),
              pinStatusLabel])
+
+        // **Remote grants** (DESIGN §2.4). The parent types only the pairing code the web app
+        // shows — the endpoint is fixed at bundle time (`RemoteClient.productionEndpoint`), not a URL
+        // to copy, because one family has one deployed backend (§8). Status, a code field with
+        // `Pair`, and `Unpair` (live only when paired).
+        add([Self.sectionTitle("Remote grants")])
+        pairingCodeField.placeholderString = "Pairing code"
+        pairingCodeField.widthAnchor.constraint(equalToConstant: 200).isActive = true
+        pairButton.title = "Pair"
+        pairButton.bezelStyle = .rounded
+        pairButton.target = self
+        pairButton.action = #selector(pairPressed)
+        pairButton.keyEquivalent = ""             // Return belongs to Save
+        unpairButton.title = "Unpair"
+        unpairButton.bezelStyle = .rounded
+        unpairButton.target = self
+        unpairButton.action = #selector(unpairPressed)
+        unpairButton.keyEquivalent = ""
+        pairingNoteLabel.textColor = .secondaryLabelColor
+        let codeRow = NSStackView(views: [pairingCodeField, pairButton])
+        codeRow.orientation = .horizontal
+        codeRow.spacing = 8
+        let codeEntryRow = field(codeRow, "Pairing code", "")
+        pairingCodeRow = codeEntryRow
+        add([field(pairingStatusValueLabel, "Status", ""),
+             codeEntryRow,
+             buttonRow([unpairButton]),
+             pairingNoteLabel,
+             Self.note("""
+                 Sign in to the web app, ask it for a pairing code, and type it here. Pairing lets \
+                 you add minutes from your phone; it never covers the screen. Pairing again on \
+                 another Mac disconnects this one — it will then show “re-pair”. Unpair disconnects \
+                 this Mac now.
+                 """)])
 
         add([Self.sectionTitle("Maintenance")])
         add([buttonRow([button("Reveal the event log", #selector(revealLog)),
@@ -385,6 +504,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 
         updatePINStatus()
         updateSessionNote()
+        refreshPairingStatus()
     }
 
     /// Fill the combo boxes' suggestion lists and the pop-up's rows from the draft, showing a
@@ -672,6 +792,123 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         }
     }
 
+    // MARK: - Remote pairing (DESIGN §2.4, T06)
+
+    /// Paint the status line, the code entry, and the `Unpair` button from the live
+    /// ``PairingStatus``. Called on open, after a pair or unpair, on the once-a-second timer, and
+    /// whenever the window returns to the front — so a token the poller (T04) has just seen
+    /// rejected shows as "re-pair" without the parent reopening the window. `Unpair` is meaningful
+    /// only when a token is stored.
+    ///
+    /// The code field and `Pair` button are shown only when entering a code can do something (T12):
+    /// hidden once ``PairingStatus/paired``, since a working token is already stored, so the section
+    /// then reads as just "Paired" plus `Unpair`. ``PairingStatus/expired`` keeps them, because a
+    /// rejected token is exactly the case where the parent needs to type a fresh code to re-pair.
+    private func refreshPairingStatus() {
+        let showCodeEntry: Bool
+        switch host.remotePairingStatus() {
+        case .notPaired:
+            pairingStatusValueLabel.stringValue = "Not paired"
+            unpairButton.isEnabled = false
+            showCodeEntry = true
+        case .paired:
+            pairingStatusValueLabel.stringValue = "Paired"
+            unpairButton.isEnabled = true
+            showCodeEntry = false
+        case .expired:
+            // A stored token the server has rejected — the parent re-pairs to get a fresh one, so
+            // the code entry stays even though a (dead) token is stored.
+            pairingStatusValueLabel.stringValue = "Paired — token rejected, re-pair"
+            unpairButton.isEnabled = true
+            showCodeEntry = true
+        }
+        // Hide the whole row, label included — hiding only the field left "Pairing code" standing
+        // alone once paired. The field and `Pair` are hidden *and* disabled as well: a
+        // hidden-but-live control is a trap. NSStackView collapses a hidden row, so no gap is left.
+        pairingCodeRow?.isHidden = !showCodeEntry
+        pairingCodeField.isHidden = !showCodeEntry
+        pairingCodeField.isEnabled = showCodeEntry
+        pairButton.isHidden = !showCodeEntry
+        pairButton.isEnabled = showCodeEntry
+    }
+
+    private func startPairingStatusTimer() {
+        guard pairingStatusTimer == nil else { return }
+        // Holds `self` strongly, as `PINChangeSheet`'s countdown does: the run loop owns the
+        // timer and it is invalidated the moment the window closes. `.common` so it keeps
+        // ticking while a menu or a sheet is open over the window.
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refreshPairingStatus() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pairingStatusTimer = timer
+    }
+
+    @objc private func pairPressed() {
+        guard !isKeyRepeat else { return }
+        // The redemption is async; the button hands off to `performPair` and returns at once so
+        // the window never blocks (Settings is not modal — the engine tick runs on `.common`).
+        Task { @MainActor in await performPair() }
+    }
+
+    /// Validate the typed code, redeem it, and show the outcome. The whole of it, so a headed
+    /// test can `await testPair()` and see exactly what a button press does (DESIGN §3.1).
+    private func performPair() async {
+        guard let code = PairingCode.normalized(pairingCodeField.stringValue) else {
+            // The rule that a code is non-empty lives in Core; this is only the English for it.
+            pairingComplaint("Type the pairing code from the web app first.")
+            return
+        }
+        // A second press cannot start a second redemption while one is in flight.
+        pairButton.isEnabled = false
+        pairingReport("Pairing…")
+        let error = await host.pairRemote(code)
+        pairButton.isEnabled = true
+        if let error {
+            pairingComplaint(Self.message(for: error))
+        } else {
+            // Success. Clear the field so the spent code is not left on screen, and let the
+            // refreshed status line ("Paired") be the confirmation.
+            pairingCodeField.stringValue = ""
+            pairingReport("Paired.")
+        }
+        refreshPairingStatus()
+    }
+
+    @objc private func unpairPressed() {
+        guard !isKeyRepeat else { return }
+        host.unpairRemote()
+        pairingReport("This Mac is no longer paired.")
+        refreshPairingStatus()
+    }
+
+    /// The English for each ``RemoteClientError`` on the pairing path. A rejected or expired code
+    /// comes back as `.http` (401 is reserved for a rejected device token, not a code — T03), so
+    /// that case reads as "the code was refused" rather than a raw status.
+    private static func message(for error: RemoteClientError) -> String {
+        switch error {
+        case .offline:
+            return "Couldn’t reach the server — check the network and try again."
+        case .timeout:
+            return "The server took too long to answer — try again."
+        case .http, .unauthorized:
+            return "That code was refused — it may have been used already or expired. "
+                + "Ask the web app for a new one."
+        case .malformed:
+            return "The server’s reply couldn’t be read — try again."
+        }
+    }
+
+    private func pairingComplaint(_ text: String) {
+        pairingNoteLabel.stringValue = text
+        pairingNoteLabel.textColor = .systemOrange
+    }
+
+    private func pairingReport(_ text: String) {
+        pairingNoteLabel.stringValue = text
+        pairingNoteLabel.textColor = .secondaryLabelColor
+    }
+
     // MARK: - Uninstall
 
     /// **Confirmed, and the data is kept unless it is asked for** (T16's uninstall note).
@@ -721,6 +958,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     // MARK: - Closing
 
     private func close() {
+        pairingStatusTimer?.invalidate()
+        pairingStatusTimer = nil
         window.delegate = nil
         window.orderOut(nil)
         Self.showing = nil
@@ -733,12 +972,15 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
     /// than to the one that was true an hour ago.
     func windowDidBecomeKey(_ notification: Notification) {
         updateSessionNote()
+        refreshPairingStatus()
     }
 
     /// The red button or `Cmd+W`. **Unsaved edits are discarded**, and deliberately: `Save`
     /// is the only thing that writes, so closing is the way to back out of a change you have
     /// half typed. Nothing here is destructive enough to be worth an "are you sure".
     func windowWillClose(_ notification: Notification) {
+        pairingStatusTimer?.invalidate()
+        pairingStatusTimer = nil
         window.delegate = nil
         Self.showing = nil
         restoreDockIcon()

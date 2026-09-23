@@ -47,6 +47,31 @@ final class AppController {
     /// process lives through.
     private let bootTime: Date
 
+    /// **The remote-grant poller** (T04), or `nil` for a run with no remote channel — tests,
+    /// and any build that has not wired one. Driven from ``tick()``: the poller launches a
+    /// fetch at most once per cadence interval and never blocks the tick (DESIGN §2.5, §3.4).
+    ///
+    /// Set after construction rather than passed to `init`, because the poller's `onApplied`
+    /// hook is this controller's own ``tick()`` and its token-rejection hook writes
+    /// ``remoteTokenRejected`` here — the same circular wiring `coverEnforcer.refresh` has, and
+    /// resolved the same way.
+    var remotePoller: RemotePoller?
+
+    #if DEBUG
+    /// The base URL the last ``configureRemotePoller(config:endpointOverride:)`` resolved and built
+    /// the installed poller's client against, or `nil` when it cleared the poller (unpaired, or a
+    /// stored endpoint that would not parse to a URL). Test-only: it lets the assembly test prove
+    /// T03's endpoint precedence was applied without reaching into the poller's `private` client.
+    /// Never read by production code.
+    private(set) var configuredRemoteBaseURL: URL?
+    #endif
+
+    /// **The device token was rejected by the backend since launch** (DESIGN §2.4, §2.7). The
+    /// poller raises it on a 401; Settings (T06) reads it to show "re-pair" instead of "Paired",
+    /// and clears it on a successful re-pair. Not persisted: a fresh launch re-checks against the
+    /// server, so a token that has since been re-paired must not read as rejected from an old run.
+    var remoteTokenRejected = false
+
     private var timer: Timer?
     private var observers: [any NSObjectProtocol] = []
     private var signalSources: [any DispatchSourceSignal] = []
@@ -152,6 +177,18 @@ final class AppController {
                              mediaPlaying: reading.mediaPlaying))
         narrateIdle(reading, at: now)
         persist(at: now)
+
+        // The remote channel (T04, DESIGN §3.4). Riding this tick means no second timer. The
+        // cadence is decided from the state the tick just produced — `lastDecision.coversScreen`
+        // is the same signal T10's menu bar reads — and `maybePoll` launches a non-blocking
+        // fetch only when the interval for that cadence has elapsed. A `nil` poller is a run
+        // with no remote channel, and this is one line that does nothing.
+        let cadence = pollCadence(paired: engine.config.isRemotePaired,
+                                  coversScreen: engine.lastDecision?.coversScreen ?? false,
+                                  onConsole: reading.sessionOnConsole,
+                                  locked: reading.screenLocked)
+        remotePoller?.maybePoll(now: now, cadence: cadence,
+                                onConsole: reading.sessionOnConsole, config: engine.config)
 
         // Last, as DESIGN §3.4 draws it. The menu bar is a view of the tick that just
         // happened, so it reads `lastDecision` rather than being handed one — and it is
@@ -348,5 +385,58 @@ final class AppController {
             source.resume()
             signalSources.append(source)
         }
+    }
+}
+
+// MARK: - Remote poller assembly
+
+extension AppController {
+
+    /// **Build and install the remote-grant poller from the current config, or clear it when the
+    /// app is not paired** (T11, DESIGN §3.2, §3.4). Called once at launch and again after every
+    /// pair/unpair, so a re-pair repoints the client at the new endpoint and an unpair silences the
+    /// channel with no relaunch. `main.swift` owns the two call sites; the assembly lives here so it
+    /// is reachable from a test without an `NSApplication` — the one thing top-level `main.swift`
+    /// code never is.
+    ///
+    /// "Paired" is ``Config/isRemotePaired`` — an endpoint *and* a token — matching T05/T06. The base
+    /// URL follows T03's precedence: `endpointOverride` (`RST_REMOTE_ENDPOINT`) wins over the stored
+    /// `config.remoteEndpoint`, resolved through ``RemoteClient/baseURL(configEndpoint:override:)``.
+    /// Unpaired, or a stored endpoint that will not parse, installs nothing and leaves the tick's
+    /// remote line dormant — the fail-closed state (DESIGN §2.5, §2.7).
+    ///
+    /// A successful (paired) build clears ``remoteTokenRejected``: a freshly redeemed token makes any
+    /// earlier 401 stale, so the channel must not come up already reading as rejected.
+    ///
+    /// The clock and calendar are this controller's own tick clock and the engine's `.current`
+    /// calendar rather than parameters, so the poller can never be handed time that disagrees with
+    /// the tick that drives it. `URLSession.shared` is the production transport; the poller's socket
+    /// wait rides it off the main actor exactly as the poller's own docs describe.
+    func configureRemotePoller(config: Config, endpointOverride: String?) {
+        guard config.isRemotePaired,
+              let baseURL = RemoteClient.baseURL(configEndpoint: config.remoteEndpoint,
+                                                 override: endpointOverride) else {
+            remotePoller = nil
+            #if DEBUG
+            configuredRemoteBaseURL = nil
+            #endif
+            return
+        }
+
+        let client = RemoteClient(session: .shared, baseURL: baseURL)
+        remotePoller = RemotePoller(
+            client: client,
+            engine: engine,
+            clock: clock,
+            // The same `.current` calendar the engine was built with in `main.swift`; the poller's
+            // day-boundary check needs one and `RSTCore` may not read `Calendar.current` itself.
+            calendar: .current,
+            onApplied: { [weak self] in self?.tick() },
+            onTokenRejected: { [weak self] in self?.remoteTokenRejected = true })
+        // A fresh token is a fresh start: any rejection from an earlier pairing is now stale.
+        remoteTokenRejected = false
+        #if DEBUG
+        configuredRemoteBaseURL = baseURL
+        #endif
     }
 }

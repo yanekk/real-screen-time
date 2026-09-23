@@ -1,0 +1,16 @@
+version = 0.1
+
+# Deploy config for the remote-grant backend. Nothing here is specific to the family: the Google
+# client id, the allowed emails, the domain and its DNS zone are resolved by CloudFormation from
+# SSM Parameter Store (/real-screen-time/*, see template.yaml), so this file is committed and any
+# checkout deploys with `npm run deploy:web` once the admin AWS profile is signed in.
+[default.deploy.parameters]
+stack_name = "real-screen-time"
+region = "eu-central-1"
+resolve_s3 = true
+capabilities = "CAPABILITY_IAM"
+confirm_changeset = false
+fail_on_empty_changeset = false
+# The Parameter Store *names* (not values) each template parameter resolves from. Spelled out,
+# because on an existing stack sam carries over the previous parameter values otherwise.
+parameter_overrides = "GoogleClientId=/real-screen-time/google-client-id AuthorizedEmails=/real-screen-time/authorized-emails CustomDomainName=/real-screen-time/custom-domain-name HostedZoneId=/real-screen-time/hosted-zone-id"

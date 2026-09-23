@@ -369,7 +369,36 @@ public final class Engine {
     /// nothing to charge; a grant puts a live session back and re-opens it. Lifting is the
     /// rule §2.5 already states — the PIN beats everything — and a parent typing minutes into
     /// the dialog means *now*, not "tomorrow, if I remember to switch it back on".
-    public func extend(minutes: Int, at now: Date) {
+    ///
+    /// **`announce` gates the spoken confirmation, not the ledger** (DESIGN §2.6). The PIN
+    /// path leaves it `true` — a parent typing minutes into the dialog is always on-console —
+    /// and the remote path (``applyRemoteGrant(id:minutes:at:announce:)``) passes whether the
+    /// child is on-console, so a grant that lands while the parent is switched in adds the
+    /// minutes and logs them but does not speak Polish over whoever is using the Mac (§2.2).
+    public func extend(minutes: Int, at now: Date, announce: Bool = true) {
+        applyExtension(minutes: minutes, at: now, announcing: announce, source: nil)
+    }
+
+    /// **The poller's one door into the ledger** (DESIGN §2.6). A remote grant cannot go
+    /// through ``extend(minutes:at:announce:)`` directly: the poller cannot mutate
+    /// ``state`` (it is `private(set)`), and the dedupe id has to be recorded in the same
+    /// object the minutes land in so the atomic `session.json` write carries both — a kill
+    /// between two writes would otherwise either re-apply the grant (id lost) or lose the
+    /// record of a grant that never landed (minutes lost, §2.7).
+    ///
+    /// It records the id, then adds the minutes on the identical path ``extend(minutes:at:announce:)``
+    /// uses — lift the stand-down, clear the warning set — and writes the `extended` event
+    /// with `source:"remote"`. `announce` is `false` off-console, so the grant is silent when
+    /// the child is not the one at the machine.
+    public func applyRemoteGrant(id: String, minutes: Int, at now: Date, announce: Bool) {
+        state.recordRemoteGrant(id: id, at: now)
+        applyExtension(minutes: minutes, at: now, announcing: announce, source: "remote")
+    }
+
+    /// The shared body of the two grant doors. `source` is the only thing that differs: the
+    /// remote grant marks its `extended` line, the local one leaves it off so existing `jq`
+    /// recipes see the same shape they always have (DESIGN §2.6).
+    private func applyExtension(minutes: Int, at now: Date, announcing: Bool, source: String?) {
         // Clamped once, here, and used for the state, the log and the test below: a negative
         // off a hand-edited caller must not hand back time, and must not switch the app on.
         let granted = max(0, minutes)
@@ -382,16 +411,22 @@ public final class Engine {
         // The remainder has just gone back over the thresholds, so the way down warns again.
         announced = nil
         uncoverReason = .extended
-        sink.append(Event(.extended, at: now,
-                          [.minutes: .number(Double(granted)),
-                           .countToday: .number(Double(state.sessionsUsedToday))]))
+        var fields: [Event.Field: EventValue] = [
+            .minutes: .number(Double(granted)),
+            .countToday: .number(Double(state.sessionsUsedToday)),
+        ]
+        // Present only for a remote grant. A local grant's line stays byte-for-byte what it
+        // was before this field existed — see ``Event/Field/source``.
+        if let source { fields[.source] = .string(source) }
+        sink.append(Event(.extended, at: now, fields))
 
         // **After the event, and only for a real grant** (§2.5, T14). `minutes: 0` changes
         // nothing, and a Mac announcing that nothing was added is worse than silence. The
         // countdown moving was the only acknowledgement until T14, and on the menu-bar path
         // — where there is no cover to come down — it was very nearly no acknowledgement at
-        // all.
-        if granted > 0 { announce(.granted(minutes: granted), at: now) }
+        // all. `announcing` is the caller's extra gate on top of ``announce(_:at:)``'s own
+        // off-console check, for a remote grant applied while the parent is switched in.
+        if granted > 0 && announcing { announce(.granted(minutes: granted), at: now) }
     }
 
     /// `PIN ▸ Wyłącz` — stand the app down until the next 06:00 (§2.5).

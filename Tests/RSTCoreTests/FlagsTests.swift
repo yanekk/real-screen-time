@@ -257,6 +257,35 @@ struct FlagsTests {
         #expect(flags.warnings.isEmpty)
     }
 
+    // MARK: - The remote-endpoint override
+
+    @Test("RST_REMOTE_ENDPOINT takes an http or https URL with a host")
+    func remoteEndpointAccepted() {
+        #expect(parse(["RST_REMOTE_ENDPOINT": "http://127.0.0.1:8080"]).remoteEndpointOverride
+                == "http://127.0.0.1:8080")
+        #expect(parse(["RST_REMOTE_ENDPOINT": "https://scratch.example.com/prod"]).remoteEndpointOverride
+                == "https://scratch.example.com/prod")
+        #expect(parse(["RST_REMOTE_ENDPOINT": "http://localhost:9"]).warnings.isEmpty)
+    }
+
+    @Test("no RST_REMOTE_ENDPOINT means no override and no noise")
+    func remoteEndpointAbsent() {
+        let flags = parse([:])
+        #expect(flags.remoteEndpointOverride == nil)
+        #expect(flags.warnings.isEmpty)
+    }
+
+    /// The failure that matters: a malformed endpoint must be *dropped and reported*, never
+    /// silently passed on. A run that believes it is hitting the scratch server while it falls
+    /// back to the configured backend is the exact mistake the override exists to prevent.
+    @Test("a value that is not an http(s) URL with a host is dropped and reported",
+          arguments: ["ftp://host", "example.com", "/local/path", "not a url", "", "file:///tmp/x"])
+    func remoteEndpointRejected(_ value: String) {
+        let flags = parse(["RST_REMOTE_ENDPOINT": value])
+        #expect(flags.remoteEndpointOverride == nil)
+        #expect(flags.warnings.count == 1, "a dropped endpoint must be reported, never silent")
+    }
+
     @Test("an environment with none of our variables in it is silent")
     func unrelatedEnvironment() {
         let flags = Flags.parse(["PATH": "/usr/bin", "HOME": "/Users/child"],

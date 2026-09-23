@@ -133,6 +133,15 @@ public struct Event: Equatable, Sendable {
         /// person reads the line. Built by ``Config/changes(to:)``, which never prints a
         /// PIN in either direction.
         case changed
+        /// `extended`: `"remote"` when the grant arrived over the network (DESIGN §2.6).
+        ///
+        /// **Absent on a grant typed at the Mac**, deliberately: a local `extended` line stays
+        /// byte-for-byte what it is today, so the existing `jq` recipes and log lines are
+        /// untouched, and only a remote grant carries the marker. That is the whole of the
+        /// field — one value, one type, and a missing field means "typed here". Written by
+        /// ``Engine/applyRemoteGrant(id:minutes:at:announce:)``; the PIN path (``Engine/extend(minutes:at:announce:)``)
+        /// writes no `source`.
+        case source
 
         public static func < (lhs: Field, rhs: Field) -> Bool { lhs.rawValue < rhs.rawValue }
     }

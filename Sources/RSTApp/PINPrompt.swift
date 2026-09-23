@@ -39,10 +39,16 @@ final class PINBoxes: NSView {
 
     private let scale: CGFloat
 
+    /// The identifier the real-click gate targets when the boxes hold the keyboard. Stable and
+    /// custom-drawn: this is not an `NSTextField`, so it is the fallback T07 confirms an
+    /// external `AXUIElement` reader can actually see by identifier on a plain `NSView`.
+    static let accessibilityID = "pin-boxes"
+
     init(scale: CGFloat) {
         self.scale = scale
         super.init(frame: .zero)
         focusRingType = .none        // drawn below, on the box that is actually next
+        setAccessibilityIdentifier(Self.accessibilityID)
     }
 
     @available(*, unavailable)
@@ -205,14 +211,15 @@ final class PINFlow: NSObject {
 
     /// The rate limit. One wrong four-digit entry, one wait — see ``PINGate``.
     private var gate = PINGate()
-    private let verifier = PINVerifier()
+    /// Injected (T03): the shipping ``PINVerifier``, or a scripted double in a headed test.
+    private let verifier: any PINVerifying
 
     private lazy var boxes = PINBoxes(scale: scale)
     private let hint = NSTextField(labelWithString: "")
 
     /// Ticks the `Spróbuj ponownie za…` line down and re-opens the boxes when it reaches
-    /// zero.
-    private var countdown: Timer?
+    /// zero. Injected (T03): the shipping ``TimerCountdown``, or a hand-driven double.
+    private let countdown: any Countdown
     /// One outcome per flow. A second `finish` would grant twice.
     private var finished = false
 
@@ -221,12 +228,18 @@ final class PINFlow: NSObject {
          clock: any Clock,
          scale: CGFloat = 1,
          diagnostics: Diagnostics = .discarded,
+         // Defaulted to the shipping pieces, so every production call site is unchanged; a
+         // headed test passes doubles for both to run without a hash and without a run loop.
+         verifier: any PINVerifying = PINVerifier(),
+         countdown: any Countdown = TimerCountdown(),
          finish: @escaping (Outcome) -> Void) {
         self.action = action
         self.config = config
         self.clock = clock
         self.scale = scale
         self.diagnostics = diagnostics
+        self.verifier = verifier
+        self.countdown = countdown
         self.finish = finish
         super.init()
 
@@ -348,19 +361,13 @@ final class PINFlow: NSObject {
     /// **A box that has stopped answering says why.** The alternative is a PIN prompt that
     /// looks broken for five seconds, which is the same thing as being broken.
     private func startCountdown() {
-        guard countdown == nil else { return }
-        // **Holds the flow strongly, on purpose.** The run loop owns the timer, so a
-        // `weak self` here would leave it firing for the life of the process if a host
-        // dropped the prompt mid-wait. This countdown stops itself the moment the gate
-        // opens — five seconds at the very most — so the cycle is bounded by the thing it
-        // is counting rather than by anyone remembering to break it.
-        let timer = Timer(timeInterval: 0.25, repeats: true) { _ in
-            MainActor.assumeIsolated { self.countdownTicked() }
-        }
-        // `.common`, so an open menu does not park the countdown — the menu-bar path opens
-        // this prompt from inside a menu tracking loop.
-        RunLoop.main.add(timer, forMode: .common)
-        countdown = timer
+        // **The tick closure holds the flow strongly, on purpose.** The countdown owns the
+        // timer, so a `weak self` here would leave it firing for the life of the process if a
+        // host dropped the prompt mid-wait. This countdown stops itself the moment the gate
+        // opens — five seconds at the very most — so the cycle is bounded by the thing it is
+        // counting rather than by anyone remembering to break it, and `complete` breaks it in
+        // every other case.
+        countdown.start { self.countdownTicked() }
     }
 
     private func countdownTicked() {
@@ -373,8 +380,7 @@ final class PINFlow: NSObject {
     }
 
     private func stopCountdown() {
-        countdown?.invalidate()
-        countdown = nil
+        countdown.stop()
     }
 
     // MARK: - Stage two: the amount
@@ -463,6 +469,22 @@ final class PINFlow: NSObject {
 
 // MARK: - Off the main thread
 
+/// **What checks a PIN for ``PINFlow``** — the injection point T00 settled for T03.
+///
+/// The shipping implementation is ``PINVerifier``, which runs 200 000 rounds of HMAC on a
+/// background queue and answers a run-loop hop later. A headed test cannot afford either: the
+/// hash is half a second each, and no run loop drains the hop in the test process (FINDINGS
+/// 2026-09-16). A test conforms a double that answers a scripted `ok` synchronously, so the
+/// wrong-PIN and each accepted-PIN path can be driven without a hash and without a pump. The
+/// flow only ever calls `offer` and reads `onResult`, so the double sees the real wiring.
+@MainActor
+protocol PINVerifying: AnyObject {
+    /// `(text, ok)`, on the main thread. Set by the flow in its init.
+    var onResult: ((String, Bool) -> Void)? { get set }
+    /// Check `text` against `hash`/`salt` and deliver the answer through ``onResult``.
+    func offer(text: String, hash: String, salt: Data)
+}
+
 /// **Runs `verifyPIN` off the main thread.**
 ///
 /// A derivation is 200 000 rounds of HMAC — measured at about half a second optimised and a
@@ -475,7 +497,7 @@ final class PINFlow: NSObject {
 /// true rather than something the caller has to remember, and it is why a stuck derivation
 /// cannot pile up behind itself.
 @MainActor
-final class PINVerifier {
+final class PINVerifier: PINVerifying {
 
     /// `(text, ok)`, on the main thread.
     var onResult: ((String, Bool) -> Void)?
@@ -512,6 +534,55 @@ final class PINVerifier {
                 }
             }
         }
+    }
+}
+
+// MARK: - The rate-limit countdown
+
+/// **Ticks ``PINFlow``'s "try again in…" line down** — the second injection point T00 settled
+/// for T03.
+///
+/// The shipping implementation is ``TimerCountdown``, a repeating `Timer` on the main run
+/// loop. That timer never fires in the test process — no run loop services it (FINDINGS
+/// 2026-09-16) — so the wrong-PIN wait would hold the boxes shut for ever under test. A
+/// headed test injects a double that stores the flow's `tick` and calls it by hand after
+/// advancing the injected `clock` past the gate's wait, so the same re-enable path runs
+/// without a run loop. The flow calls only `start`/`stop`, so the double drives the real code.
+@MainActor
+protocol Countdown {
+    /// Begin calling `tick` repeatedly. A second `start` while already running does nothing —
+    /// the flow re-arms by `stop` then `start`, never by starting twice.
+    func start(_ tick: @escaping () -> Void)
+    /// Stop; no `tick` fires after this returns. Called on every finish and re-open.
+    func stop()
+}
+
+/// The shipping countdown: a quarter-second repeating `Timer`, in `.common` mode so an open
+/// menu does not park it (the menu-bar path opens the prompt from inside a menu tracking
+/// loop). It holds `tick` — and therefore the flow — strongly, on purpose: see
+/// ``PINFlow/startCountdown()``.
+@MainActor
+final class TimerCountdown: Countdown {
+    private var timer: Timer?
+    // Held here rather than captured into the timer's closure: the closure is `@Sendable`,
+    // so it reaches the tick through `self` (a main-actor object) exactly as the flow's old
+    // inline timer reached `countdownTicked` through its own `self`.
+    private var tick: (() -> Void)?
+
+    func start(_ tick: @escaping () -> Void) {
+        guard timer == nil else { return }
+        self.tick = tick
+        let timer = Timer(timeInterval: 0.25, repeats: true) { _ in
+            MainActor.assumeIsolated { self.tick?() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+    }
+
+    func stop() {
+        timer?.invalidate()
+        timer = nil
+        tick = nil
     }
 }
 

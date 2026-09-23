@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Real Screen Time</title>
+    <!-- The server injects its own GOOGLE_CLIENT_ID here at serve time (static.ts), so the page and
+         the backend that verifies the returned token always agree on the OAuth audience. -->
+    <meta name="google-signin-client_id" content="__GOOGLE_CLIENT_ID__" />
+    <!-- Google Identity Services, the only external resource, is loaded by app.js only when the
+         parent actually has to sign in; a signed-in visit never fetches it. -->
+    <style>
+      :root {
+        color-scheme: light dark;
+        --gap: 16px;
+      }
+      * { box-sizing: border-box; }
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        padding: 48px var(--gap);
+      }
+      main {
+        width: 100%;
+        max-width: 360px;
+        display: flex;
+        flex-direction: column;
+        gap: var(--gap);
+      }
+      h1 { font-size: 1.25rem; margin: 0; text-align: center; }
+      #signin { display: flex; justify-content: center; min-height: 44px; }
+      #amounts { display: flex; gap: var(--gap); }
+      button.amount {
+        flex: 1;
+        font-size: 1.25rem;
+        padding: 18px 0;
+        border-radius: 12px;
+        border: 1px solid currentColor;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      button.amount:disabled { opacity: 0.4; cursor: default; }
+      #connect, #unpair {
+        padding: 12px;
+        border-radius: 12px;
+        border: 1px solid currentColor;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+      }
+      #connect:disabled, #unpair:disabled { opacity: 0.4; cursor: default; }
+      #pairstate { text-align: center; min-height: 1.25rem; opacity: 0.8; }
+      #code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 1.75rem;
+        letter-spacing: 0.15em;
+        text-align: center;
+        min-height: 1.75rem;
+      }
+      #status { text-align: center; min-height: 1.25rem; opacity: 0.8; }
+
+      /* What is visible is decided by the two <body> attributes the server fills when it serves
+         the page (static.ts) and app.js updates afterwards — never by the script's first run, so
+         the first paint is already the final state: no sign-in button flashes for a signed-in
+         parent, no "Connect a Mac" flashes for a paired one (DESIGN §2.2 amendment 2026-09-23).
+           data-signed-in  "true" | "false"
+           data-paired     "true" | "false" | "unknown" (unknown shows Connect, as not paired) */
+      body[data-signed-in="true"] #signin,
+      body:not([data-signed-in="true"]) :is(#signout, #unpair, #pairstate),
+      body[data-paired="true"] #connect,
+      body:not([data-paired="true"]) :is(#unpair, #pairstate) {
+        display: none;
+      }
+      /* Signed out, the controls stay visible but greyed (the parent's choice, 2026-09-23). */
+      body:not([data-signed-in="true"]) :is(button.amount, #connect) {
+        opacity: 0.4;
+        cursor: default;
+        pointer-events: none;
+      }
+      #signout {
+        align-self: center;
+        padding: 8px 16px;
+        border-radius: 10px;
+        border: 1px solid currentColor;
+        background: transparent;
+        color: inherit;
+        opacity: 0.7;
+        cursor: pointer;
+        font-size: 0.9rem;
+      }
+    </style>
+  </head>
+  <body data-signed-in="__SIGNED_IN__" data-paired="__PAIRED__">
+    <main>
+      <h1>Real Screen Time</h1>
+      <div id="signin"></div>
+      <!-- The amounts are in the markup, not built by the script, so they are there on first paint.
+           They must match AMOUNTS in app.js; test/web.test.ts checks that. -->
+      <div id="amounts">
+        <button class="amount" type="button" data-minutes="15">+15</button>
+        <button class="amount" type="button" data-minutes="30">+30</button>
+        <button class="amount" type="button" data-minutes="60">+60</button>
+      </div>
+      <div id="pairstate">A Mac is paired</div>
+      <button id="connect" type="button">Connect a Mac</button>
+      <button id="unpair" type="button">Unpair</button>
+      <div id="code"></div>
+      <div id="status"></div>
+      <button id="signout" type="button">Sign out</button>
+    </main>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

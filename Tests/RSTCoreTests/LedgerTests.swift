@@ -1159,6 +1159,80 @@ struct SessionStoreTests {
     }
 }
 
+/// The applied remote-grant set (DESIGN §2.6, §2.7): its prune, the rollover clear, and its
+/// round-trip through `session.json`. The `record`-then-`decide` interaction lives in
+/// `RemoteGrantTests` beside the decision it feeds.
+@Suite("SessionState remote grants")
+struct SessionStateRemoteGrantTests {
+
+    private let warsaw = ledgerCalendar(in: "Europe/Warsaw")
+
+    @Test("pruneRemoteGrants drops entries older than the TTL and keeps the rest")
+    func prunesByTTL() {
+        let now = warsaw.at(2026, 8, 22, 14, 0, 0)
+        let ttl: TimeInterval = 900
+        var state = SessionState()
+        state.recordRemoteGrant(id: "old", at: now.addingTimeInterval(-(ttl + 1)))   // just past
+        state.recordRemoteGrant(id: "edge", at: now.addingTimeInterval(-ttl))         // exactly TTL
+        state.recordRemoteGrant(id: "fresh", at: now.addingTimeInterval(-60))
+
+        state.pruneRemoteGrants(olderThan: ttl, now: now)
+
+        // The edge is kept — an entry exactly `ttl` old is still within it.
+        #expect(Set(state.appliedRemoteGrants.keys) == ["edge", "fresh"])
+    }
+
+    @Test("06:00 rollover clears the applied remote-grant set")
+    func rolloverClearsAppliedRemoteGrants() {
+        let config = Config()
+        let evening = warsaw.at(2026, 8, 22, 22, 0, 0)
+        var state = SessionState(dayKey: "2026-08-22", lastHeartbeat: evening,
+                                 appliedRemoteGrants: ["g1": evening, "g2": evening])
+        #expect(!state.appliedRemoteGrants.isEmpty)
+
+        // Next morning, past 06:00: the day key changes and every day-bound field resets.
+        state.advance(to: warsaw.at(2026, 8, 23, 7, 0, 0), snapshot: sensors(),
+                      config: config, calendar: warsaw)
+
+        #expect(state.dayKey == "2026-08-23")
+        #expect(state.appliedRemoteGrants.isEmpty)
+    }
+
+    @Test("the applied remote-grant set round-trips through session.json")
+    func appliedRemoteGrantsRoundTrip() throws {
+        try withLedgerDirectory { directory in
+            let store = SessionStore(directory: directory)
+            let now = warsaw.at(2026, 8, 22, 18, 30, 15)
+            let state = SessionState(dayKey: "2026-08-22", lastHeartbeat: now,
+                                     appliedRemoteGrants: ["g1": now, "g2": now + 5])
+
+            try store.save(state)
+            let loaded = store.load()
+
+            #expect(loaded.outcome == .loaded)
+            #expect(loaded.state.appliedRemoteGrants == state.appliedRemoteGrants)
+        }
+    }
+
+    /// The deliberate departure from `last_heartbeat`, which quarantines the whole file on a
+    /// bad timestamp: a garbled dedupe entry is dropped instead, because losing one such entry
+    /// (worst case, one grant re-applies) is far cheaper than ending the child's live session.
+    @Test("a garbled applied-grant timestamp is dropped, not fatal to the ledger")
+    func garbledAppliedGrantEntryIsLenient() throws {
+        try withLedgerDirectory { directory in
+            let store = SessionStore(directory: directory)
+            try Data(#"{"day_key":"2026-08-22","remaining_seconds":300,"applied_remote_grants":{"good":"2026-08-22T12:00:00Z","bad":"tuesday"}}"#.utf8)
+                .write(to: store.url)
+
+            let loaded = store.load()
+
+            #expect(loaded.outcome == .loaded)               // the session survives the bad entry
+            #expect(loaded.state.remainingSeconds == 300)
+            #expect(Set(loaded.state.appliedRemoteGrants.keys) == ["good"])
+        }
+    }
+}
+
 // MARK: - Shared helpers
 
 /// A fixed-zone calendar. Duplicated from `DayWindowTests` rather than shared: the helper

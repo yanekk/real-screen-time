@@ -34,6 +34,21 @@ public struct Config: Codable, Equatable, Sendable {
     public var pinHash: String = ""
     public var pinSalt: String = ""
 
+    /// The remote channel (DESIGN §3.5). No new file: these live in `config.json` beside the
+    /// PIN hash. Both the endpoint and the token are readable by the child and harmless to
+    /// him — the token is read-only (§2.3) — so they are stored in cleartext deliberately,
+    /// the same call that put `pin_hash` here rather than in a Keychain (initial-build §2.5).
+    public var remoteEndpoint: String = ""
+    public var remoteDeviceToken: String = ""
+    /// How often the poller asks the backend for grants — fast while a grant is expected,
+    /// slow otherwise. Read the clamped values through ``remotePollFastInterval`` /
+    /// ``remotePollSlowInterval``, never these raw fields.
+    public var remotePollFastSeconds: Int = 4
+    public var remotePollSlowSeconds: Int = 45
+    /// How long an applied remote grant stays live before it is pruned (§3.5). Read it through
+    /// ``remoteGrantTTLInterval``, never raw.
+    public var remoteGrantTTLSeconds: Int = 900
+
     /// The shipped defaults.
     public init() {}
 
@@ -62,6 +77,23 @@ public struct Config: Codable, Equatable, Sendable {
         return cleaned.isEmpty ? Self.defaultExtensionOptions : cleaned
     }
 
+    /// Paired means both an endpoint to reach and a token to reach it with. Derived, not
+    /// stored: either one alone is a half-finished pairing that can talk to nothing.
+    public var isRemotePaired: Bool { !remoteEndpoint.isEmpty && !remoteDeviceToken.isEmpty }
+
+    /// The poll intervals and the TTL as the code should actually use them: never zero or
+    /// negative. `config.json` is hand-editable with nothing validating it (T03 finding), so
+    /// `remote_poll_fast_seconds: 0` is one edit away — and a zero poll interval is a spinning
+    /// timer, a zero TTL expires every grant the instant it lands. The floor is 1 second: the
+    /// smallest value that is still a poll rather than a busy-loop. This mirrors
+    /// ``extensionChoices`` and ``pinSaltData`` — the raw field is preserved and round-trips,
+    /// the sanitised value is what callers read.
+    public var remotePollFastInterval: TimeInterval { Self.secondsFloor(remotePollFastSeconds) }
+    public var remotePollSlowInterval: TimeInterval { Self.secondsFloor(remotePollSlowSeconds) }
+    public var remoteGrantTTLInterval: TimeInterval { Self.secondsFloor(remoteGrantTTLSeconds) }
+
+    private static func secondsFloor(_ seconds: Int) -> TimeInterval { TimeInterval(max(1, seconds)) }
+
     /// The salt as bytes, or `nil` if it is absent or not base64. A malformed salt is not
     /// a configured PIN, and callers must treat it as "no PIN" rather than guessing.
     public var pinSaltData: Data? {
@@ -84,6 +116,11 @@ public struct Config: Codable, Equatable, Sendable {
         case extensionOptions = "extension_options"
         case pinHash = "pin_hash"
         case pinSalt = "pin_salt"
+        case remoteEndpoint = "remote_endpoint"
+        case remoteDeviceToken = "remote_device_token"
+        case remotePollFastSeconds = "remote_poll_fast_seconds"
+        case remotePollSlowSeconds = "remote_poll_slow_seconds"
+        case remoteGrantTTLSeconds = "remote_grant_ttl_seconds"
     }
 
     static let jsonKeys: Set<String> = Set(CodingKeys.allCases.map(\.rawValue))
@@ -109,6 +146,11 @@ public struct Config: Codable, Equatable, Sendable {
         extensionOptions = try value(.extensionOptions, defaults.extensionOptions)
         pinHash = try value(.pinHash, defaults.pinHash)
         pinSalt = try value(.pinSalt, defaults.pinSalt)
+        remoteEndpoint = try value(.remoteEndpoint, defaults.remoteEndpoint)
+        remoteDeviceToken = try value(.remoteDeviceToken, defaults.remoteDeviceToken)
+        remotePollFastSeconds = try value(.remotePollFastSeconds, defaults.remotePollFastSeconds)
+        remotePollSlowSeconds = try value(.remotePollSlowSeconds, defaults.remotePollSlowSeconds)
+        remoteGrantTTLSeconds = try value(.remoteGrantTTLSeconds, defaults.remoteGrantTTLSeconds)
     }
 }
 

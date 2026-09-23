@@ -119,6 +119,21 @@ public struct SessionState: Codable, Equatable, Sendable {
     /// A PIN-granted stand-down (§2.5). Stored here, interpreted by T05's `decide`.
     public var disabledUntil: Date?
 
+    /// **Remote grants already applied today, id to the time they landed** (DESIGN §2.6, §2.7).
+    ///
+    /// The dedupe store for the remote channel. The backend delivers at-least-once — a retry, a
+    /// poll overlapping a consume, a kill after applying but before consuming — so a grant can
+    /// arrive twice, and applying it twice would hand out double the minutes. An id in here means
+    /// "already honoured"; ``decideRemoteGrant(_:applied:now:ttl:dayResetHour:calendar:)`` skips
+    /// it as a duplicate.
+    ///
+    /// It lives in `session.json` rather than a new store because it is day-bound state that must
+    /// reset at 06:00 exactly like the session (DESIGN §3.5): it is cleared at the rollover and
+    /// pruned to entries within the TTL by ``pruneRemoteGrants(olderThan:now:)``. It never grows
+    /// unbounded — a grant older than the TTL is skipped as stale (freshness) before dedupe would
+    /// ever be consulted, so forgetting it changes no decision.
+    public var appliedRemoteGrants: [String: Date]
+
     /// **Not persisted.** A session is live only inside the run that started or resumed it.
     ///
     /// This is the other half of the four-quadrant reading T05 needs, and it is why a
@@ -186,7 +201,8 @@ public struct SessionState: Codable, Equatable, Sendable {
                 lastHeartbeat: Date = .distantPast,
                 exitKind: ExitKind = .unknown,
                 disabledUntil: Date? = nil,
-                isLive: Bool = false) {
+                isLive: Bool = false,
+                appliedRemoteGrants: [String: Date] = [:]) {
         self.dayKey = dayKey
         self.remainingSeconds = Self.clampedSeconds(remainingSeconds)
         self.selfServiceStarts = selfServiceStarts
@@ -195,6 +211,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         self.exitKind = exitKind
         self.disabledUntil = disabledUntil
         self.isLive = isLive
+        self.appliedRemoteGrants = appliedRemoteGrants
     }
 
     /// Self-service sessions started today — the number `selfServiceSessionsPerDay` gates.
@@ -311,6 +328,31 @@ public struct SessionState: Codable, Equatable, Sendable {
     public mutating func resume() {
         wasRunning = true
         isLive = true
+    }
+
+    // MARK: - Remote-grant dedupe
+
+    /// Mark a remote grant applied, so a second delivery of the same id is skipped (DESIGN §2.6).
+    ///
+    /// **Recorded in the same object the minutes land in, and persisted with them.** The id and
+    /// the minutes have to be written together or a kill between the two saves would either
+    /// re-apply the grant (id lost) or lose the record of a grant that never landed (minutes
+    /// lost). `Engine.applyRemoteGrant` calls this on the same mutation that adds the minutes so
+    /// the atomic `session.json` write carries both.
+    public mutating func recordRemoteGrant(id: String, at: Date) {
+        appliedRemoteGrants[id] = at
+    }
+
+    /// Drop dedupe entries older than the TTL (DESIGN §2.7).
+    ///
+    /// Safe to forget them: a grant that old is skipped as stale by freshness *before* dedupe is
+    /// ever consulted (``decideRemoteGrant(_:applied:now:ttl:dayResetHour:calendar:)`` checks
+    /// non-positive, then already-applied, then boundary, then stale — but a re-served old grant
+    /// fails the day-boundary or staleness check regardless of whether its id is still here). So
+    /// this only keeps the set from accumulating within a day; the 06:00 rollover clears it
+    /// entirely. Kept iff the entry is within the TTL — an entry exactly `ttl` old is kept.
+    public mutating func pruneRemoteGrants(olderThan ttl: TimeInterval, now: Date) {
+        appliedRemoteGrants = appliedRemoteGrants.filter { now.timeIntervalSince($0.value) <= ttl }
     }
 
     /// Stand down until `date` (§2.5). Clearing a stand-down is `disable(until: nil)`.
@@ -515,6 +557,11 @@ public struct SessionState: Codable, Equatable, Sendable {
         wasRunning = false
         isLive = false
 
+        // Cleared with the rest of the day's state (DESIGN §2.7): a dedupe id must not leak
+        // across 06:00, or a grant re-served the next day would read as already-applied when it
+        // is a fresh grant for a fresh day. It is day-bound state, so it resets when the day does.
+        appliedRemoteGrants = [:]
+
         pruneHistory(keeping: key)
         return discarded
     }
@@ -545,6 +592,7 @@ public struct SessionState: Codable, Equatable, Sendable {
         case lastHeartbeat = "last_heartbeat"
         case exitKind = "exit_kind"
         case disabledUntil = "disabled_until"
+        case appliedRemoteGrants = "applied_remote_grants"
     }
 
     /// Every key optional on the way in, as `Config` is: a file written by an older build
@@ -565,6 +613,8 @@ public struct SessionState: Codable, Equatable, Sendable {
         lastHeartbeat = try Self.decodeTimestamp(container, .lastHeartbeat) ?? defaults.lastHeartbeat
         disabledUntil = try Self.decodeTimestamp(container, .disabledUntil)
         isLive = false
+        appliedRemoteGrants = Self.decodeAppliedRemoteGrants(container)
+            ?? defaults.appliedRemoteGrants
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -577,6 +627,10 @@ public struct SessionState: Codable, Equatable, Sendable {
         let formatter = Self.timestampFormatter(fractional: true)
         try container.encode(formatter.string(from: lastHeartbeat), forKey: .lastHeartbeat)
         try container.encodeIfPresent(disabledUntil.map(formatter.string(from:)), forKey: .disabledUntil)
+        // id -> ISO 8601 text, the same readable form as every other timestamp in this file: a
+        // parent may open `session.json`, and an epoch double says nothing to anybody.
+        let appliedText = appliedRemoteGrants.mapValues { formatter.string(from: $0) }
+        try container.encode(appliedText, forKey: .appliedRemoteGrants)
     }
 
     /// Timestamps are ISO 8601 text, not a `Date` left to the encoder's strategy: this file
@@ -603,6 +657,33 @@ public struct SessionState: Codable, Equatable, Sendable {
         }
         throw DecodingError.dataCorruptedError(forKey: key, in: container,
                                                debugDescription: "not an ISO 8601 timestamp: \(text)")
+    }
+
+    /// The applied-grant set from `id -> ISO 8601 text`, or `nil` if the key is absent.
+    ///
+    /// **Lenient, and deliberately unlike ``decodeTimestamp(_:_:)`` which throws.** A single
+    /// garbled entry here is dropped rather than failing the whole decode, because a failed
+    /// `SessionState` decode quarantines `session.json` and ends the running session (see
+    /// ``SessionStore/load()``) — far too heavy a penalty for one unparseable dedupe timestamp.
+    /// The worst a dropped entry can do is let one grant re-apply, and only if it is also still
+    /// unconsumed on the server and still fresh, which is a rounding error next to costing the
+    /// child his live session. Absent map key returns `nil`, distinct from an empty map.
+    private static func decodeAppliedRemoteGrants(
+        _ container: KeyedDecodingContainer<CodingKeys>) -> [String: Date]? {
+        guard let raw = try? container.decodeIfPresent([String: String].self,
+                                                       forKey: .appliedRemoteGrants) else {
+            return nil
+        }
+        var parsed: [String: Date] = [:]
+        for (id, text) in raw {
+            for fractional in [true, false] {
+                if let date = timestampFormatter(fractional: fractional).date(from: text) {
+                    parsed[id] = date
+                    break
+                }
+            }
+        }
+        return parsed
     }
 }
 

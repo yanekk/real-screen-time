@@ -58,6 +58,25 @@ public enum MinuteList {
     }
 }
 
+// MARK: - The pairing code (DESIGN §2.4, T06)
+
+/// **The one rule the pairing field holds**: a code is the non-empty text left after trimming
+/// surrounding whitespace. Kept in Core beside the other Settings rules so `make test` reaches
+/// it — the App layer only reads the field's `stringValue` and calls this.
+///
+/// Whitespace-only or empty is `nil`: there is nothing to redeem, so the window says so rather
+/// than spending a network round-trip to be told the same. Anything else is trimmed and passed
+/// on verbatim — the code's alphabet is the backend's (T08), so the Mac does not second-guess
+/// its shape, only that the parent typed something.
+public enum PairingCode {
+
+    /// The trimmed code, or `nil` when nothing but whitespace was typed.
+    public static func normalized(_ raw: String) -> String? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 // MARK: - Detection, shown in minutes (CR-01 §7, T03)
 
 /// **The two grace settings are stored in seconds and shown in minutes** — CR-01 §7, DESIGN §2.7.
@@ -325,6 +344,16 @@ extension Config {
         note(.mediaGraceSeconds, mediaGraceSeconds, updated.mediaGraceSeconds)
         note(.warningMinutes, warningMinutes, updated.warningMinutes, list)
         note(.extensionOptions, extensionOptions, updated.extensionOptions, list)
+        // **The remote pairing fields have to be reported, or a pair/unpair does not persist.**
+        // `commitConfig` (main.swift) skips the write when this list is empty, so leaving the
+        // pairing fields out here would make redeeming a code silently do nothing (T06). The
+        // endpoint is a URL and safe to print; the device token is a credential and is masked
+        // the same way the PIN is — the log is a plain file a child can read (DESIGN §2.3, §2.4).
+        note(.remoteEndpoint, remoteEndpoint, updated.remoteEndpoint,
+             { $0.isEmpty ? "\"\"" : $0 })
+        if remoteDeviceToken != updated.remoteDeviceToken {
+            changes.append("\(CodingKeys.remoteDeviceToken.rawValue) changed")
+        }
         // Never the value, in either direction — the log is a plain file a child can read.
         if pinHash != updated.pinHash || pinSalt != updated.pinSalt {
             changes.append("\(CodingKeys.pinHash.rawValue) changed")

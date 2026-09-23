@@ -1,0 +1,155 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Real Screen Time — remote-grant backend. One HTTP API in front of one Lambda in front of
+  one DynamoDB table (DESIGN §3.6). The parent signs in with Google to create grants; the
+  child's Mac holds a read-only device token to fetch and consume them. Shapes proven by the
+  T00 spike on the parent's real account (FINDINGS 2026-09-22).
+
+# Every deployment-specific value lives in SSM Parameter Store under /real-screen-time/, never in
+# the repo (2026-09-23): CloudFormation resolves these at deploy time, so `sam deploy` needs no
+# parameter overrides and samconfig.toml holds nothing about the family. The parameters are
+# plain String type because that is the only kind CloudFormation parameter types can resolve;
+# they are guarded by the account's IAM like everything else here. Seeding them on a new account
+# is in README.md. `make bundle` reads custom-domain-name the same way for the Mac app.
+Parameters:
+  GoogleClientId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /real-screen-time/google-client-id
+    Description: OAuth 2.0 Web client ID from the Google Cloud console.
+  AuthorizedEmails:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /real-screen-time/authorized-emails
+    Description: Comma-separated allowlist of parent Google account emails (the authorization).
+  CustomDomainName:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /real-screen-time/custom-domain-name
+    Description: The web app's own domain, and the backend address the Mac app is bundled with.
+  HostedZoneId:
+    Type: AWS::SSM::Parameter::Value<String>
+    Default: /real-screen-time/hosted-zone-id
+    Description: Route 53 hosted zone (in this account) that owns CustomDomainName.
+
+Globals:
+  Function:
+    Runtime: nodejs22.x # T00 deployed this fine; fall back to nodejs20.x if an account rejects it
+    Timeout: 10
+    MemorySize: 256
+
+Resources:
+  # One table, three item kinds keyed by `pk` (T00 FINDINGS): "DEVICE_TOKEN" (singleton),
+  # "GRANT#<id>", "CODE#<code>". The `ttl` attribute self-expires grants and codes; DynamoDB
+  # deletes lazily (~48h), so the reads in repo.ts also filter on ttl.
+  Table:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  # The single Lambda. It routes by method + path internally (as the spike did), so adding
+  # the endpoints in T08 is code, not template. `/` serves the static page same-origin; the
+  # proxy route catches every API path. T08 fills src/handler.ts; T10 runs the real build.
+  ApiFn:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: esbuild
+      BuildProperties:
+        EntryPoints:
+          - src/handler.ts
+        Target: es2022
+        Sourcemap: true
+        Minify: false
+        # The AWS SDK v3 is provided by the nodejs runtime — do not bundle it.
+        External:
+          - "@aws-sdk/*"
+    Properties:
+      CodeUri: .
+      Handler: handler.handler
+      Environment:
+        Variables:
+          GOOGLE_CLIENT_ID: !Ref GoogleClientId
+          AUTHORIZED_EMAILS: !Ref AuthorizedEmails
+          TABLE_NAME: !Ref Table
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref Table
+      Events:
+        Root:
+          Type: HttpApi
+          Properties:
+            Path: /
+            Method: ANY
+        Proxy:
+          Type: HttpApi
+          Properties:
+            Path: /{proxy+}
+            Method: ANY
+
+  # The web app's own address (2026-09-23). Attached to the implicit HTTP API that SAM generates
+  # (logical id ServerlessHttpApi) rather than converting it to an explicit AWS::Serverless::HttpApi,
+  # which would replace the API and change its execute-api URL (ApiUrl). That URL keeps serving
+  # alongside this one, so a Mac paired against it keeps working until it is re-paired.
+  #
+  # The certificate validates itself: CloudFormation writes the DNS validation record into the
+  # hosted zone and waits for ACM to issue (a few minutes on first deploy). Regional endpoint, so
+  # the certificate lives in this stack's region, not us-east-1.
+  DomainCertificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref CustomDomainName
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref CustomDomainName
+          HostedZoneId: !Ref HostedZoneId
+
+  ApiDomain:
+    Type: AWS::ApiGatewayV2::DomainName
+    Properties:
+      DomainName: !Ref CustomDomainName
+      DomainNameConfigurations:
+        - CertificateArn: !Ref DomainCertificate
+          EndpointType: REGIONAL
+          SecurityPolicy: TLS_1_2
+
+  ApiDomainMapping:
+    Type: AWS::ApiGatewayV2::ApiMapping
+    # The $default stage is SAM-generated; the mapping needs it to exist first.
+    DependsOn: ServerlessHttpApiApiGatewayDefaultStage
+    Properties:
+      DomainName: !Ref ApiDomain
+      ApiId: !Ref ServerlessHttpApi
+      Stage: $default
+
+  # Only this one name is written; the zone's mail records (MX, SPF, DKIM, DMARC) are untouched.
+  ApiDomainRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref CustomDomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt ApiDomain.RegionalDomainName
+        HostedZoneId: !GetAtt ApiDomain.RegionalHostedZoneId
+
+Outputs:
+  ApiUrl:
+    Description: >
+      Base URL of the backend. Register it (no trailing slash) as an Authorized JavaScript
+      origin on the Google OAuth client, and set remote_endpoint to it in the Mac's config.
+    Value: !Sub "https://${ServerlessHttpApi}.execute-api.${AWS::Region}.amazonaws.com"
+  WebUrl:
+    Description: >
+      The web app's own address. Register it (no trailing slash) as an Authorized JavaScript
+      origin on the Google OAuth client, next to ApiUrl.
+    Value: !Sub "https://${CustomDomainName}"
+  TableName:
+    Description: The DynamoDB table name.
+    Value: !Ref Table

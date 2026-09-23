@@ -100,9 +100,17 @@ parameter, never from `Date()`.
 A test enforces this by scanning `RSTCore` sources for forbidden imports. **If that test
 fails, the fix is to move the code, never to relax the test.**
 
-Why it matters: it is what makes a full day of behaviour testable in milliseconds on a
-machine where UI automation does not exist. Every rule that leaks into `RSTApp` becomes a
-rule that can only be checked by hand.
+The Tier 1 headed suite carries a twin of that scan. `WindowScanTests` in
+`Tests/RSTAppTests` reads the headed test sources as text and fails on any call by which a
+test could order a window onto a display or engage the kiosk — `orderFront`,
+`makeKeyAndOrderFront`, `NSApp.run`, `NSApp.activate`, `setActivationPolicy(.regular)`,
+`presentationOptions`, `beginSheet`, and a class's own `show(`/`present(`. Same rule: **if
+it fails, remove the call, never relax the scan.** It is what lets the headed suite run
+under `make test` with no chance of a cover reaching a real screen.
+
+Why it matters: the boundary is what makes a full day of behaviour testable in milliseconds,
+and the two scans are what keep the app-layer tests from ever putting a window on screen.
+Every rule that leaks past them becomes a rule that can only be checked by hand.
 
 ### Never call `Date()` outside `SystemClock`
 
@@ -150,6 +158,24 @@ something is surprising, absent where it is not.
 ### Small commits, one per task
 
 Commit message references the task: `T04: budget ledger and gap classification`.
+
+### Every task runs the safe suite, plus a test matched to what it touched
+
+Before a task is done it runs the full safe suite green — `make test`, which is the `RSTCore`
+suites and the Tier 1 in-memory headed suite together. That is cheap and every session does it
+anyway. On top of that, matched to what the task touched:
+
+- A task that adds or changes a screen adds a Tier 1 headed test for it (`Tests/RSTAppTests`).
+- A task that changes the cover also runs the Tier 2 real-click gate (`make ui-gate`) and hands
+  the result to me before it is called done — it drives a real window and needs the grant.
+- A pure-logic task adds `RSTCore` tests as today and needs no headed test; forcing one onto logic
+  already proven in memory only adds flake.
+- A task whose claim is physical — the kiosk, a real game, the camera, audio, reboot — hands over
+  to me and records the answer in the plan's `FINDINGS.md`. There is no automated test to write.
+
+The tiers are named in full in `plans/headed-and-e2e-tests/DESIGN.md §2`, and `TESTING.md` is
+the ladder. The rule is tiered rather than "every task ships an e2e test" because a blanket rule
+forces empty click-tests onto pure logic and cannot apply to the checks only a person can see.
 
 ---
 
@@ -202,10 +228,16 @@ These are known, verified or flagged, and each has cost someone a day somewhere:
 
 ```bash
 swift build                      # debug build
-make test                        # L1 + L2, headless, no windows, always safe
-                                 # (bare `swift test` cannot see Testing.framework)
+make test                        # Core + Tier 1 headed suites; no window ordered on
+                                 # screen; always safe (bare `swift test` cannot see
+                                 # Testing.framework)
+make ui-gate                     # Tier 2 real-click gate: launches the built app as a
+                                 # boxed, seatbelted cover and drives it through the
+                                 # Accessibility system; needs a one-time grant; on
+                                 # demand, never part of `make test` — see TESTING.md
 make bundle                      # assemble + ad-hoc sign dist/RealScreenTime.app
-make install                     # bundle, then copy to /Applications
+make install                     # bundle, then copy to /Applications — NOT how a build
+                                 # reaches the child's account; see "Shipping a build" below
 
 # Manual testing — see plans/initial-build/TESTING.md. These are for me to run, not you:
 # ask before any enforcing run, and always with a seatbelt.
@@ -236,6 +268,52 @@ In a release build `RST_ENFORCE` defaults to `1`; the rest still work.
 `plans/initial-build/RECOVERY.md`. Short version: **reboot and log in as `admin`.**
 A LaunchAgent only exists inside a logged-in session — the login window is beyond this app's
 reach, always.
+
+---
+
+## Shipping a build to the child's Mac — the updater, never `make install`
+
+**The installed app updates itself.** In Settings (behind the PIN) the parent presses
+**Update**: `Sources/RSTApp/Updater.swift` fetches the latest release of the public GitHub
+repo (`repoOwner`/`repoName` there), compares its tag with `AppVersion.current`, downloads the
+`RealScreenTime.app.zip` asset, validates it, and swaps it into `/Applications` behind one admin
+password prompt, then relaunches. The version decision is `RSTCore`'s `ReleaseInfo` (tested);
+the download, prompt and swap are hand-verified only.
+
+So a finished change reaches the child by **cutting a release** (`RELEASING.md`): bump
+`AppVersion.current`, `make release` (needs `aws sso login --profile admin`, because
+`make bundle` reads the backend address from Parameter Store), then publish the zip as a GitHub
+release. **Do not propose `make install` for the child's Mac** — it bypasses the version the
+updater compares against and the path the parent actually uses. It is only for a throwaway
+local check of the bundle, and even then the boxed `swift run` in the Commands above is
+usually the better tool.
+
+Three things about releases that are easy to get wrong:
+
+- **The public repo is a detached, history-free snapshot**, not a remote of this repo. A
+  release is committed into a clone of the public repo (or a fresh re-snapshot of this tree
+  with the same exclusions and scrub, `RELEASING.md`). Never add a remote here and push: that
+  publishes this repo's full private history.
+- **Publishing is public and cannot be taken back.** A release, and anything in the snapshot, is
+  the parent's go every time — say what goes public before asking.
+- **The release asset carries the backend address** (`RSTRemoteEndpoint` in its Info.plist,
+  stamped from Parameter Store). Anyone who downloads the public release can read it. Nothing
+  family-specific belongs in the snapshot itself (`server/CLAUDE.md`).
+
+After an update the app keeps the endpoint it was paired against (`config.json`); moving it to a
+new backend address still needs a re-pair in Settings.
+
+---
+
+## The web app and backend — `server/`
+
+The parent's web page (sign in, add 15 / 30 / 60 minutes, pair or unpair the Mac) and the AWS
+backend behind it live in [`server/`](server/), built by the `remote-grant` plan. It is
+TypeScript on Node, deployed to the parent's AWS account, and meets the Mac app only over HTTP.
+**Read [`server/CLAUDE.md`](server/CLAUDE.md) before working there.** It holds the commands,
+and the standing permission to deploy with `npm run deploy:web` once the `admin` AWS
+credentials are checked. The Swift-only rules in this file (Core/App boundary, no third-party
+dependencies, `make test`) do not apply to that folder.
 
 ---
 

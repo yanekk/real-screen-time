@@ -15,6 +15,7 @@ against `AppVersion.current`, and downloads the release asset named `RealScreenT
 2. **Package the asset.**
 
    ```bash
+   aws sso login --profile admin   # make bundle reads the backend address from Parameter Store
    make release
    ```
 
@@ -51,6 +52,22 @@ The updater's target repo is set once, in `Sources/RSTApp/Updater.swift` — `re
 `repoName`. While either is empty the Update button reports "not set up yet" rather than
 firing a request at a nonexistent path. These are wired to the real repo at first publish
 (T06) and change only if the repo moves.
+
+## The public repo is a detached snapshot
+
+The public repo (`yanekk/real-screen-time`) was created as a *fresh initial commit* — a
+single historyless snapshot of the cleaned tree — so the private full-history working repo
+on this machine has **no remote and shares no history with it**. `spike/`, `.claude/` and,
+from v1.1.0, `plans/` are not published: the plan docs name the family and the admin account
+(v1.0.1 shipped them with the admin home path scrubbed; v1.1.0 dropped them instead). Two
+consequences for the next release:
+
+- Cut it by cloning the public repo and committing the new version there (or re-snapshotting
+  this tree the way T06 did), not by adding a remote to this working repo — pushing this
+  repo would publish the whole private history the fresh commit exists to avoid.
+- Keep the same exclusions, or the private data comes back. Before pushing, grep the snapshot
+  case-insensitively for the admin username, the family's names, the backend domain, the AWS
+  account id and the parent's email; any hit stops the release.
 
 ## The one irreversible step
 
