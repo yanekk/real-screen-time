@@ -19,6 +19,11 @@ struct Diagnostics: Sendable {
         write = { message, date in sink.note(message, at: date) }
     }
 
+    /// Anywhere at all — for a test that asserts on what was said.
+    init(writing write: @escaping @Sendable (String, Date) -> Void) {
+        self.write = write
+    }
+
     private init(discarding: Void) {
         write = { _, _ in }
     }

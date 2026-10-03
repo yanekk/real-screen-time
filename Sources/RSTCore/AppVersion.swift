@@ -10,7 +10,7 @@ import Foundation
 /// plist-only version would be blank in exactly the mode a developer uses most.
 public enum AppVersion {
     /// The single source of truth. Bump this to release; the build stamps it into the bundle.
-    public static let current: String = "1.1.0"
+    public static let current: String = "1.2.0"
 
     /// Numeric per-component compare of `MAJOR.MINOR.PATCH` strings, so `1.0.10 > 1.0.9`
     /// (lexical order would put `1.0.10` before `1.0.9`). Returns `.orderedAscending` when

@@ -55,6 +55,13 @@ public struct CoverModel: Equatable, Sendable {
         case pin
         /// `Zablokuj ekran` — his own way to hand the machine back. **No PIN** (§2.6).
         case lock
+        /// `Wyloguj` — the other way to hand it back, which also closes the game. **No PIN**,
+        /// like `.lock`; the app asks for a confirmation in place before it acts, because a
+        /// hard log-out loses unsaved work (cover-buttons-logout DESIGN §2.2, §2.3).
+        ///
+        /// The raw value is the button's Accessibility identifier, which `make ui-gate` finds
+        /// it by — renaming it breaks the gate, not the build.
+        case logout
     }
 
     public let face: Face
@@ -72,11 +79,18 @@ public struct CoverModel: Equatable, Sendable {
     ///     nothing.
     ///   - sessionsUsedToday: self-service starts on today's day key.
     ///   - config: read for the session length and the day's allowance.
-    public init?(decision: Decision?, sessionsUsedToday: Int, config: Config) {
+    ///   - canLock: whether `SACLockScreenImmediate` resolved at launch. When it did not,
+    ///     `.lock` is dropped rather than relabelled: a lock button that logs out would put
+    ///     a second, unconfirmed `Wyloguj` beside the real one (cover-buttons-logout §2.4).
+    public init?(decision: Decision?, sessionsUsedToday: Int, config: Config,
+                 canLock: Bool = true) {
         guard let decision, decision.coversScreen else { return nil }
 
         let used = max(0, sessionsUsedToday)
         let limit = config.selfServiceLimit
+        // The dead-end faces' buttons, in drawing order. One list for both faces, because
+        // `.expired` and `.exhausted` differ only in the sentence above them.
+        let endOfTurn: [Button] = canLock ? [.pin, .lock, .logout] : [.pin, .logout]
 
         switch decision {
         case .awaitingStart where decision.offersSelfServiceStart:
@@ -95,7 +109,7 @@ public struct CoverModel: Equatable, Sendable {
             // drawn without consulting `offersSelfServiceStart` deletes the one limit the
             // app enforces for itself — and no test below this layer would fail.
             face = .exhausted
-            buttons = [.pin, .lock]
+            buttons = endOfTurn
         case .awaitingResume(let remaining):
             // Rounded **up**, so the last part-minute reads `1 minuta` rather than
             // `0 minut`. An offer of nothing is what the child would read as broken, and
@@ -104,7 +118,7 @@ public struct CoverModel: Equatable, Sendable {
             buttons = [.resume]
         case .expired(let left):
             face = max(0, left) > 0 ? .expired : .exhausted
-            buttons = [.pin, .lock]
+            buttons = endOfTurn
         case .dormant, .allowed, .warning:
             // Unreachable: `coversScreen` above is the one place that says which three
             // cases put the cover up. Returning nil rather than trapping — a face nobody

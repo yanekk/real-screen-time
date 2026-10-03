@@ -85,14 +85,60 @@ struct CoverModelTests {
     func expiredFace() {
         let model = Self.cover(.expired(selfServiceLeft: 2))
         #expect(model?.face == .expired)
-        #expect(model?.buttons == [.pin, .lock])
+        #expect(model?.buttons == [.pin, .lock, .logout])
     }
 
     @Test("an expired session with nothing left says the day is over")
     func exhaustedAfterASession() {
         let model = Self.cover(.expired(selfServiceLeft: 0))
         #expect(model?.face == .exhausted)
-        #expect(model?.buttons == [.pin, .lock])
+        #expect(model?.buttons == [.pin, .lock, .logout])
+    }
+
+    // MARK: - Log out (cover-buttons-logout §2.2, §2.4)
+
+    /// The three decisions that put up one of the two dead-end faces.
+    private static let endOfTurn: [Decision] = [
+        .expired(selfServiceLeft: 2),       // `Czas minął`
+        .expired(selfServiceLeft: 0),       // `Na dziś koniec sesji`, after a session
+        .awaitingStart(selfServiceLeft: 0), // `Na dziś koniec sesji`, none started
+    ]
+
+    @Test("both time's-up faces offer PIN, lock and log out, in that order",
+          arguments: endOfTurn)
+    func endOfTurnOffersLogout(_ decision: Decision) {
+        #expect(Self.cover(decision)?.buttons == [.pin, .lock, .logout])
+    }
+
+    /// With no lock to offer, `.lock` is dropped rather than relabelled — a relabelled lock
+    /// would be a second, unconfirmed `Wyloguj` beside the real one.
+    @Test("when the screen cannot be locked the lock button is dropped, not doubled",
+          arguments: endOfTurn)
+    func cannotLockDropsLock(_ decision: Decision) {
+        let model = CoverModel(decision: decision, sessionsUsedToday: 1,
+                               config: Self.configured, canLock: false)
+        #expect(model?.buttons == [.pin, .logout])
+    }
+
+    @Test("start and resume faces are the same whether or not the screen can lock",
+          arguments: [true, false])
+    func startAndResumeIgnoreCanLock(_ canLock: Bool) {
+        let start = CoverModel(decision: .awaitingStart(selfServiceLeft: 1), sessionsUsedToday: 0,
+                               config: Self.configured, canLock: canLock)
+        #expect(start?.face == .start(sessionMinutes: 30, index: 1, limit: 1))
+        #expect(start?.buttons == [.start])
+        let resume = CoverModel(decision: .awaitingResume(remaining: 1200), sessionsUsedToday: 0,
+                                config: Self.configured, canLock: canLock)
+        #expect(resume?.face == .resume(minutesLeft: 20))
+        #expect(resume?.buttons == [.resume])
+    }
+
+    /// The raw value is the Accessibility identifier `make ui-gate` finds the button by.
+    @Test("the log-out button exists and is identified as logout")
+    func logoutButtonIdentifier() {
+        #expect(CoverModel.Button.allCases.contains(.logout))
+        #expect(CoverModel.Button.logout.rawValue == "logout")
+        #expect(CoverModel.Button(rawValue: "logout") == .logout)
     }
 
     // MARK: - The daily cap
@@ -107,7 +153,7 @@ struct CoverModelTests {
     func spentAllowanceOffersNoStart() {
         let model = Self.cover(.awaitingStart(selfServiceLeft: 0), used: 1)
         #expect(model?.face == .exhausted)
-        #expect(model?.buttons == [.pin, .lock])
+        #expect(model?.buttons == [.pin, .lock, .logout])
         #expect(model?.buttons.contains(.start) == false)
     }
 

@@ -3,10 +3,13 @@ import RSTCore
 
 /// `Zablokuj ekran` — the child's own way to end a turn (DESIGN §2.6).
 ///
-/// **Resolved at startup, never at click time**, and the button is labelled from what was
-/// found. `SACLockScreenImmediate` is private API: acceptable here, since this app is
-/// ad-hoc signed and never leaves two machines, but it has to degrade rather than crash —
-/// and a `Zablokuj ekran` that does nothing is worse than an honest `Wyloguj`.
+/// **Resolved at startup, never at click time**, and whether the button is drawn at all
+/// follows what was found. `SACLockScreenImmediate` is private API: acceptable here, since
+/// this app is ad-hoc signed and never leaves two machines, but it has to degrade rather
+/// than crash — and a `Zablokuj ekran` that does nothing is worse than no button. When the
+/// symbol is gone the cover drops `.lock` and offers only its confirmed `Wyloguj`
+/// (cover-buttons-logout DESIGN §2.4); the bootout that used to be the fallback here is
+/// ``SessionLogout``'s now.
 ///
 /// Measured on macOS 26.5, 2026-08-22: the symbol is present and returns 0, and the lock is
 /// immediate — no dim-and-wait, no Automation prompt, no Accessibility grant. Locking beats
@@ -19,10 +22,9 @@ enum ScreenLock {
     enum Mechanism {
         /// `SACLockScreenImmediate()` — the real thing.
         case lockImmediately
-        /// `launchctl bootout gui/$UID`. A hard logout, and the last resort: it kills
-        /// everything the child had open. Only ever reached if the private symbol has
-        /// vanished from a future macOS.
-        case logOut
+        /// The private symbol has vanished from a future macOS. Nothing to lock with, so the
+        /// cover does not offer the button (`CoverModel`'s `canLock: false`).
+        case unavailable
     }
 
     private static let framework =
@@ -31,8 +33,8 @@ enum ScreenLock {
     private typealias LockFunction = @convention(c) () -> Int32
     private static var lockImmediately: LockFunction?
 
-    /// What ``engage(_:at:)`` will do — read by the cover to label its button.
-    static var mechanism: Mechanism { lockImmediately == nil ? .logOut : .lockImmediately }
+    /// What ``engage(_:at:)`` can do — read by the cover to decide whether `.lock` is drawn.
+    static var mechanism: Mechanism { lockImmediately == nil ? .unavailable : .lockImmediately }
 
     /// Look the symbol up. **Call once, at launch.**
     ///
@@ -41,12 +43,12 @@ enum ScreenLock {
     /// trying to hand the machine back.
     static func resolve(_ diagnostics: Diagnostics, at now: Date) {
         guard let handle = dlopen(framework, RTLD_LAZY) else {
-            diagnostics("screen lock: \(framework) will not load — \(dlerror().map { String(cString: $0) } ?? "no reason given"), falling back to log out",
+            diagnostics("screen lock: \(framework) will not load — \(dlerror().map { String(cString: $0) } ?? "no reason given"), the cover will offer Wyloguj only",
                         at: now)
             return
         }
         guard let symbol = dlsym(handle, "SACLockScreenImmediate") else {
-            diagnostics("screen lock: SACLockScreenImmediate is gone from login.framework — falling back to log out",
+            diagnostics("screen lock: SACLockScreenImmediate is gone from login.framework — the cover will offer Wyloguj only",
                         at: now)
             return
         }
@@ -54,34 +56,21 @@ enum ScreenLock {
         diagnostics("screen lock: SACLockScreenImmediate resolved", at: now)
     }
 
-    /// Lock, or log out if there is nothing to lock with.
+    /// Lock the screen.
     ///
     /// The event is `Engine.lockScreen(at:)`'s to write, and it is written before this is
     /// called — the rule being that the record is stamped with the decision, not with
     /// whatever the system did about it afterwards.
     @discardableResult
     static func engage(_ diagnostics: Diagnostics, at now: Date) -> Bool {
-        if let lockImmediately {
-            let result = lockImmediately()
-            diagnostics("screen lock: SACLockScreenImmediate returned \(result)", at: now)
-            return result == 0
-        }
-
-        // No `sudo`, no root: `gui/$UID` is this user's own session, which is exactly the
-        // one being ended. `launchctl` is in /bin on every macOS.
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/bin/launchctl")
-        task.arguments = ["bootout", "gui/\(getuid())"]
-        do {
-            try task.run()
-            diagnostics("screen lock: no symbol — logging out with launchctl bootout", at: now)
-            return true
-        } catch {
-            // Both routes gone. Said out loud rather than swallowed: the child is standing
-            // in front of a cover pressing a button that does nothing, and the only trace
-            // of why is this line.
-            diagnostics("screen lock: launchctl bootout failed — \(error)", at: now)
+        guard let lockImmediately else {
+            // Unreachable while the cover drops `.lock` for `.unavailable`; said out loud
+            // rather than assumed, since the only trace of a dead button is this line.
+            diagnostics("screen lock: no SACLockScreenImmediate — nothing to lock with", at: now)
             return false
         }
+        let result = lockImmediately()
+        diagnostics("screen lock: SACLockScreenImmediate returned \(result)", at: now)
+        return result == 0
     }
 }

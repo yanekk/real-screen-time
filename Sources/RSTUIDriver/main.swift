@@ -42,6 +42,10 @@ let wrongPIN = "0000"
 let axStart = "start"
 let axPIN = "pin"
 let axPINBoxes = "pin-boxes"
+// `Wyloguj` on the face, and its in-place confirmation's two buttons (cover-buttons-logout T03).
+let axLogout = "logout"
+let axLogoutCancel = "logout-cancel"
+let axLogoutConfirm = "logout-confirm"
 
 // MARK: - Key codes
 
@@ -223,6 +227,9 @@ func launchApp(appPath: String, dataDir: URL) -> Process {
     environment[Flags.Name.coverFrame] = coverFrame
     environment[Flags.Name.maxCoverSeconds] = String(seatbeltSeconds)
     environment[Flags.Name.dataDirectory] = dataDir.path
+    // A real log-out ends the session running this gate. Dry run on every launch, which
+    // wins over `RST_ALLOW_LOGOUT=1` and holds even against a release binary (§2.5).
+    environment[Flags.Name.logoutDryRun] = "1"
     process.environment = environment
     try? process.run()
     return process
@@ -340,8 +347,8 @@ func scenarioRightPIN(appPath: String) -> Bool {
     notePINBoxesReachability(app: element)
     typePIN(correctPIN)
 
-    // After the correct PIN verifies (~1s off-main) the prompt swaps to the amount picker, whose
-    // confirm button answers Return (keyEquivalent "\r"). Press Return on a poll until the grant
+    // After the correct PIN verifies (~1s off-main) the prompt swaps to the amount buttons, whose
+    // first `+N` answers Return (keyEquivalent "\r") and grants at once. Press Return on a poll until the grant
     // lands: before the picker is up Return is a no-op (the boxes ignore it), after the cover
     // lifts there is no key window to receive it, so repeating it is harmless.
     let deadline = Date().addingTimeInterval(12)
@@ -357,6 +364,51 @@ func scenarioRightPIN(appPath: String) -> Bool {
     report(passed, "right-pin",
            passed ? "PIN accepted, amount confirmed, cover lifted and logged extended"
                   : "extended logged=\(granted), cover lifted=\(lifted) (\(dataDir.path))")
+    return passed
+}
+
+/// `Wyloguj` asks before it acts: cancel leaves no `logged_out`; confirm writes exactly one and
+/// reaches the performer, which is a dry run here (`RST_LOGOUT_DRY_RUN=1`, `launchApp`). The
+/// face comes back after either answer, and the cover never lifts.
+func scenarioLogout(appPath: String) -> Bool {
+    let dataDir = scratchBase.appendingPathComponent("logout")
+    seedConfig(dataDir: dataDir, selfService: 0)
+    let app = launchApp(appPath: appPath, dataDir: dataDir)
+    defer { app.terminate(); app.waitUntilExit() }
+    let element = AXUIElementCreateApplication(app.processIdentifier)
+
+    func fail(_ why: String) -> Bool {
+        report(false, "logout", "\(why) (\(dataDir.path))")
+        return false
+    }
+
+    // Cancel first.
+    guard let logout = waitForControl(app: element, identifier: axLogout, timeout: 12),
+          clickCentre(of: logout) else { return fail("the Wyloguj button never appeared or had no frame") }
+    guard let cancel = waitForControl(app: element, identifier: axLogoutCancel, timeout: 6),
+          waitForControl(app: element, identifier: axLogoutConfirm, timeout: 1) != nil,
+          clickCentre(of: cancel) else { return fail("the confirmation did not open after Wyloguj") }
+    guard let again = waitForControl(app: element, identifier: axLogout, timeout: 6) else {
+        return fail("Anuluj did not bring the face back")
+    }
+    guard eventCount(dataDir: dataDir, type: "logged_out") == 0 else {
+        return fail("Anuluj wrote a logged_out event")
+    }
+
+    // Then confirm.
+    guard clickCentre(of: again),
+          let confirm = waitForControl(app: element, identifier: axLogoutConfirm, timeout: 6),
+          clickCentre(of: confirm) else { return fail("the confirmation did not reopen, or Wyloguj had no frame") }
+    let deadline = Date().addingTimeInterval(6)
+    while eventCount(dataDir: dataDir, type: "logged_out") == 0 && Date() < deadline { usleep(200_000) }
+    let faceBack = waitForControl(app: element, identifier: axLogout, timeout: 6) != nil
+    let events = eventCount(dataDir: dataDir, type: "logged_out")
+    let dryRun = appLogContains(dataDir: dataDir, "logout: dry run")
+    let stillUp = !axWindows(element).isEmpty
+    let passed = events == 1 && dryRun && faceBack && stillUp
+    report(passed, "logout",
+           passed ? "cancel wrote nothing; confirm logged one logged_out, dry-ran, face back, cover held"
+                  : "logged_out=\(events), dry run logged=\(dryRun), face back=\(faceBack), cover up=\(stillUp) (\(dataDir.path))")
     return passed
 }
 
@@ -413,6 +465,7 @@ let results = [
     scenarioStart(appPath: appPath),
     scenarioWrongPIN(appPath: appPath),
     scenarioRightPIN(appPath: appPath),
+    scenarioLogout(appPath: appPath),
 ]
 
 let passedAll = results.allSatisfy { $0 }

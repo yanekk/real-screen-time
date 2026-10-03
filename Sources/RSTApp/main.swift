@@ -240,9 +240,22 @@ if bootTime == nil {
 // only an enforcing run can reach, so an observer run assembles it and never locks anything.
 let kiosk = KioskLock(clock: clock, diagnostics: diagnostics)
 
+// The cover's `Wyloguj`. Built here and nowhere else, and real only where
+// `Flags.logoutIsReal` says so: the installed app, or a debug run with `RST_ALLOW_LOGOUT=1`
+// and no `RST_LOGOUT_DRY_RUN=1` (cover-buttons-logout DESIGN §2.5). A real one ends the
+// whole login session, the developer's own included.
+let sessionLogout = SessionLogout(real: flags.logoutIsReal, diagnostics: diagnostics)
+if flags.enforcing {
+    // Worded so it never matches the `logout: dry run` line the ui-gate looks for, which
+    // must come from a confirmed press, not from launch.
+    diagnostics("log-out mode: \(flags.logoutIsReal ? "REAL (launchctl bootout)" : "dry run")",
+                at: startedAt)
+}
+
 let coverEnforcer: CoverEnforcer? = flags.enforcing
     ? CoverEnforcer(frame: flags.coverFrame, clock: clock, seatbelt: seatbelt,
-                    watchdog: watchdog, kiosk: kiosk, sink: sink, diagnostics: diagnostics)
+                    watchdog: watchdog, kiosk: kiosk, sink: sink, logout: sessionLogout,
+                    diagnostics: diagnostics)
     : nil
 
 // `RST_STALL_SECONDS` — T15's manual test, and the one flag in this file that exists to

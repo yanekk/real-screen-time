@@ -31,6 +31,13 @@ public enum EventType: String, Codable, Sendable, CaseIterable {
     case configChanged = "config_changed"
     case watchdogExit  = "watchdog_exit"
     case appQuit       = "app_quit"
+    /// `Wyloguj` confirmed on the cover. Written **before** the log-out runs, stamped with
+    /// the decision time: a real log-out kills this process within seconds, so a line
+    /// written after it would never be written at all (cover-buttons-logout §2.2).
+    ///
+    /// Recorded for a dry run too — the decision was made; `app.log` says whether the
+    /// log-out itself was real.
+    case loggedOut     = "logged_out"
     /// Observer mode: the app decided to cover and deliberately did not (`RST_ENFORCE=0`).
     /// Distinct from `blocked` so a development run cannot be mistaken for a real block
     /// when the log is read months later.

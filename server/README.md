@@ -44,8 +44,9 @@ cd server && npm run build:web    # web/ → src/webAssets.ts
 ```
 
 `test/web.test.ts` fails if the embedded copy has drifted from `web/`, so a forgotten regenerate is
-caught by `make server-test`. The DOM wiring and real Google sign-in need a browser and a real
-account — they are hand-verified in T10 (DESIGN §5.1), not by the suite.
+caught by `make server-test`. The page's DOM wiring is tested in `test/web-dom.test.ts`, which runs
+the real page in happy-dom (a simulated DOM) with fetch, confirm and Google stubbed; see CLAUDE.md.
+Only real Google sign-in and a real browser's rendering are left to hand-verify (DESIGN §5.1).
 
 ### The auth model, in one line each
 

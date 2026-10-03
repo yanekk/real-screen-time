@@ -23,6 +23,27 @@ npm run deploy:web     # build:web, sam build, sam deploy --profile admin
 `web/` is the source of truth for the page; `src/webAssets.ts` is generated and never
 hand-edited. `test/web.test.ts` fails if the two drift.
 
+## Testing the page — every UI behaviour gets a happy-dom test
+
+**Every unit test of the web page's UI runs the real page in happy-dom** (the parent's rule,
+2026-09-23). Anything a parent can trigger or see on the page — a button, a confirmation, what is
+shown or hidden, a status line, a timer — is tested in [`test/web-dom.test.ts`](test/web-dom.test.ts):
+load the real `web/index.html` and `web/app.js` with its `loadPage()` helper, click, and assert on the
+DOM. Stub only what leaves the page: `fetch` (the `server` option, keyed `"METHOD /path"`),
+`window.confirm`, and Google's library. Never reach the network, and never re-implement page logic
+in the test.
+
+A change to `web/` that adds or alters UI behaviour lands with its happy-dom test in the same
+commit. Pure helpers exported from `app.js` may keep plain unit tests in `test/web.test.ts`, but a
+helper test does not stand in for the page test: the page test is what shows the button is wired.
+
+What happy-dom cannot show — a real browser drawing the page, the native confirm box, real Google
+sign-in, a real phone — is still handed to the parent (DESIGN §5.1), but only that residue.
+
+Two traps already hit: parse `index.html` with `DOMParser`, not a regex (its CSS comments contain
+`<body>`); and under the happy-dom environment the global `URL` is the DOM's, so use `node:url`'s
+for file paths.
+
 ## Deploying — you may do it on your own
 
 **You have the parent's standing permission to deploy with `npm run deploy:web`** without

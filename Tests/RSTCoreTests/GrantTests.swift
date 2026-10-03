@@ -229,7 +229,7 @@ struct GrantTests {
                                sessionsUsedToday: h.engine.state.sessionsUsedToday,
                                config: h.config)
         #expect(cover?.face == .exhausted)
-        #expect(cover?.buttons == [.pin, .lock])
+        #expect(cover?.buttons == [.pin, .lock, .logout])
     }
 
     /// A grant on the expired cover puts the child back in, and the minutes run out exactly

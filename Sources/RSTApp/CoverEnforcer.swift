@@ -50,6 +50,9 @@ final class CoverEnforcer: Enforcing {
     /// `ObserverEnforcer` instead, and nothing in this file — the cover, the app quitting,
     /// or a word of Polish out of the speakers — is reachable from it.
     private let warner: Warner
+    /// What a confirmed `Wyloguj` runs. Injected so the real ``SessionLogout`` is built in
+    /// `main.swift` alone (cover-buttons-logout DESIGN §2.5, §5.2).
+    private let logout: any LogoutPerforming
 
     init(frame: CoverFrame?,
          clock: any Clock,
@@ -57,8 +60,10 @@ final class CoverEnforcer: Enforcing {
          watchdog: Watchdog,
          kiosk: KioskLock,
          sink: any EventSink,
+         logout: any LogoutPerforming,
          diagnostics: Diagnostics = .discarded) {
         self.frame = frame
+        self.logout = logout
         self.clock = clock
         self.seatbelt = seatbelt
         self.watchdog = watchdog
@@ -94,7 +99,8 @@ final class CoverEnforcer: Enforcing {
 
         guard let model = CoverModel(decision: decision,
                                      sessionsUsedToday: engine.state.sessionsUsedToday,
-                                     config: engine.config) else {
+                                     config: engine.config,
+                                     canLock: ScreenLock.mechanism == .lockImmediately) else {
             controller.hide()
             evictor.reset()
             return
@@ -229,6 +235,14 @@ final class CoverEnforcer: Enforcing {
             // session is still over. Locking is a polite exit, not an escape (§2.6).
             engine.lockScreen(at: now)
             ScreenLock.engage(diagnostics, at: now)
+            return
+        case .logout:
+            // Only ever sent by the confirmation's `Wyloguj`, never by the face's: the view
+            // asks first (cover-buttons-logout §2.2). The event first, then the log-out; the
+            // cover stays up, because a real log-out ends this process and a dry or failed
+            // one leaves the session exactly as over as it was.
+            diagnostics("cover: Wyloguj confirmed", at: now)
+            LogoutCommand(engine: engine, performer: logout).apply(at: now)
             return
         }
 

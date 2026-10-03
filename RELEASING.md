@@ -57,7 +57,7 @@ firing a request at a nonexistent path. These are wired to the real repo at firs
 
 The public repo (`yanekk/real-screen-time`) was created as a *fresh initial commit* — a
 single historyless snapshot of the cleaned tree — so the private full-history working repo
-on this machine has **no remote and shares no history with it**. `spike/`, `.claude/` and,
+on this machine has **no remote and shares no history with it**. `spike/`, `.claude/`, `.pir/` (pir's run rules) and,
 from v1.1.0, `plans/` are not published: the plan docs name the family and the admin account
 (v1.0.1 shipped them with the admin home path scrubbed; v1.1.0 dropped them instead). Two
 consequences for the next release:

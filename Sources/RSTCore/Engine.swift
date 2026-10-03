@@ -455,6 +455,15 @@ public final class Engine {
         sink.append(Event(.screenLocked, at: now))
     }
 
+    /// `Wyloguj`, confirmed — the record only, exactly as ``lockScreen(at:)`` is. Changes
+    /// nothing in the ledger: the log-out ends this process, and the next login starts from
+    /// the ledger as after any other log-out (cover-buttons-logout §2.3).
+    ///
+    /// The log-out itself is `RSTApp`'s, and it runs after this returns.
+    public func logOut(at now: Date) {
+        sink.append(Event(.loggedOut, at: now))
+    }
+
     // MARK: - Internals
 
     private func beginSession(by: UncoverReason, at now: Date) {

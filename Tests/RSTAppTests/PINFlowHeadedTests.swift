@@ -99,34 +99,123 @@ struct PINFlowHeadedTests {
 
     // MARK: - The outcomes
 
-    /// A correct PIN for `.extend` shows the amounts, first pre-selected; choosing one and
-    /// confirming yields `.extend(minutes:)` with that amount.
-    @Test("a right PIN to extend shows amounts, and a chosen one yields .extend(minutes:)")
-    func extendYieldsChosenAmount() {
+    /// A correct PIN for `.extend` shows `Dodaj minuty`, one `+N` button per default amount
+    /// and `Anuluj`, and no radio button anywhere: the picker-plus-confirm shape is gone
+    /// (cover-buttons-logout DESIGN §2.1).
+    @Test("a right PIN to extend shows +15 +30 +60 and Anuluj, and no radio button")
+    func extendShowsAmountButtons() {
         HeadedHarness.withApp { _ in
-            var outcome: PINFlow.Outcome?
-            let flow = Self.makeFlow(.extend, verifier: ScriptedVerifier(accept: true)) {
-                outcome = $0
+            let flow = Self.makeFlow(.extend, verifier: ScriptedVerifier(accept: true))
+            Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
+
+            #expect(Self.strings(of: flow) == [Strings.grantTitle, "+15", "+30", "+60",
+                                               Strings.pinCancelButton])
+            for button in flow.view.allDescendants(of: NSButton.self) {
+                #expect(!Self.isRadio(button), "‘\(button.title)’ is a radio button")
+                // The cover's style, in the panel too (T05: the parent chose it to follow).
+                #expect((button as? CoverButton)?.role
+                        == (button.title == "+15" ? .primary : .neutral),
+                        "‘\(button.title)’")
             }
-            let boxes = try! #require(flow.keyboardTarget as? PINBoxes)
-
-            Self.type("1379", into: boxes)
-
-            // The default extension choices, drawn in order, each as a Strings amount.
-            let amounts = Config().extensionChoices
-            for amount in amounts {
-                #expect(Self.button(Strings.minutes(amount), in: flow) != nil, "\(amount) missing")
+            for amount in [15, 30, 60] {
+                let button = Self.button("+\(amount)", in: flow)
+                #expect(button?.accessibilityIdentifier() == "amount-\(amount)")
             }
-            #expect(outcome == nil)   // nothing granted until an amount is confirmed
-
-            // Pick the second amount rather than the pre-selected first, so the assertion
-            // proves the chosen value flows through and not just the default.
-            let chosen = amounts[1]
-            Self.button(Strings.minutes(chosen), in: flow)?.performClick(nil)
-            Self.button(Strings.grantConfirmButton, in: flow)?.performClick(nil)
-
-            #expect(outcome == .extend(minutes: chosen))
         }
+    }
+
+    /// One press on `+30` grants exactly 30, at once; a second press after it is ignored,
+    /// so a double click cannot grant twice.
+    @Test("+30 finishes the flow with .extend(minutes: 30) exactly once")
+    func amountButtonGrantsOnce() {
+        HeadedHarness.withApp { _ in
+            var outcomes: [PINFlow.Outcome] = []
+            let flow = Self.makeFlow(.extend, verifier: ScriptedVerifier(accept: true)) {
+                outcomes.append($0)
+            }
+            Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
+            #expect(outcomes.isEmpty)   // nothing granted until an amount is pressed
+
+            let plus30 = try! #require(Self.button(Strings.grantAmountButton(30), in: flow))
+            plus30.performClick(nil)
+            #expect(outcomes == [.extend(minutes: 30)])
+
+            plus30.performClick(nil)
+            Self.button(Strings.grantAmountButton(15), in: flow)?.performClick(nil)
+            #expect(outcomes == [.extend(minutes: 30)])
+        }
+    }
+
+    /// `Anuluj` on the amount step backs out with `.cancelled`, granting nothing.
+    @Test("Anuluj on the amount step finishes with .cancelled")
+    func cancelOnAmountStep() {
+        HeadedHarness.withApp { _ in
+            var outcomes: [PINFlow.Outcome] = []
+            let flow = Self.makeFlow(.extend, verifier: ScriptedVerifier(accept: true)) {
+                outcomes.append($0)
+            }
+            Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
+            #expect(Self.strings(of: flow).contains(Strings.grantTitle))
+
+            Self.button(Strings.pinCancelButton, in: flow)?.performClick(nil)
+            #expect(outcomes == [.cancelled])
+        }
+    }
+
+    /// The parent's own list, in the parent's order. Above three amounts the buttons stack
+    /// vertically so a long list does not run off a 600×400 boxed cover; only the first
+    /// carries Return.
+    @Test("config [10, 20, 45, 90]: four buttons in order, vertical, only the first on Return")
+    func customAmountsVerticalFirstOnReturn() {
+        HeadedHarness.withApp { _ in
+            var config = Self.configuredPIN()
+            config.extensionOptions = [10, 20, 45, 90]
+            let flow = Self.makeFlow(.extend, config: config,
+                                     verifier: ScriptedVerifier(accept: true))
+            Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
+
+            let amounts = Self.amountButtons(in: flow)
+            #expect(amounts.map(\.title) == ["+10", "+20", "+45", "+90"])
+            #expect(amounts.map(\.tag) == [10, 20, 45, 90])
+            let grid = amounts.first?.superview as? NSStackView
+            #expect(grid?.orientation == .vertical)
+            #expect(amounts.map(\.keyEquivalent) == ["\r", "", "", ""])
+            // Anuluj does not answer Return either: Enter grants, it never cancels.
+            #expect(Self.button(Strings.pinCancelButton, in: flow)?.keyEquivalent == "")
+        }
+    }
+
+    /// Three or fewer amounts sit in one horizontal row; the first carries Return there too.
+    @Test("the default three amounts sit in a horizontal row, first on Return")
+    func defaultAmountsHorizontal() {
+        HeadedHarness.withApp { _ in
+            let flow = Self.makeFlow(.extend, verifier: ScriptedVerifier(accept: true))
+            Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
+
+            let amounts = Self.amountButtons(in: flow)
+            #expect((amounts.first?.superview as? NSStackView)?.orientation == .horizontal)
+            #expect(amounts.map(\.keyEquivalent) == ["\r", "", ""])
+        }
+    }
+
+    /// A config with no usable amounts falls back to `+15 +30 +60`. ``GrantModel`` owns the
+    /// fallback; this proves it reaches the screen.
+    @Test("no usable amounts in config falls back to +15 +30 +60 on screen")
+    func unusableAmountsFallBack() {
+        HeadedHarness.withApp { _ in
+            var config = Self.configuredPIN()
+            config.extensionOptions = [0, -5]
+            let flow = Self.makeFlow(.extend, config: config,
+                                     verifier: ScriptedVerifier(accept: true))
+            Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
+
+            #expect(Self.amountButtons(in: flow).map(\.title) == ["+15", "+30", "+60"])
+        }
+    }
+
+    @Test("Strings.grantAmountButton(15) is +15")
+    func grantAmountButtonString() {
+        #expect(Strings.grantAmountButton(15) == "+15")
     }
 
     /// The three non-extend paths, each straight from a correct PIN with no second stage:
@@ -180,8 +269,10 @@ struct PINFlowHeadedTests {
 
             // Amount stage — reached by a correct PIN.
             Self.type("1379", into: try! #require(entry.keyboardTarget as? PINBoxes))
-            expected = [Strings.grantTitle, Strings.pinCancelButton, Strings.grantConfirmButton]
-            for amount in Config().extensionChoices { expected.insert(Strings.minutes(amount)) }
+            expected = [Strings.grantTitle, Strings.pinCancelButton]
+            for amount in Config().extensionChoices {
+                expected.insert(Strings.grantAmountButton(amount))
+            }
             for shown in Self.strings(of: entry) {
                 #expect(expected.contains(shown), "‘\(shown)’ on the amount stage is not a Strings value")
             }
@@ -203,11 +294,12 @@ struct PINFlowHeadedTests {
 
     /// Build a flow with the two seam doubles injected and a default no-op `finish`.
     static func makeFlow(_ action: PINAction,
+                         config: Config = configuredPIN(),
                          clock: any Clock = FakeClock(Date(timeIntervalSince1970: 1_800_000_000)),
                          verifier: any PINVerifying,
                          countdown: any Countdown = ManualCountdown(),
                          finish: @escaping (PINFlow.Outcome) -> Void = { _ in }) -> PINFlow {
-        PINFlow(action: action, config: configuredPIN, clock: clock,
+        PINFlow(action: action, config: { config }, clock: clock,
                 verifier: verifier, countdown: countdown, finish: finish)
     }
 
@@ -239,6 +331,20 @@ struct PINFlowHeadedTests {
 
     static func button(_ title: String, in flow: PINFlow) -> NSButton? {
         flow.view.allDescendants(of: NSButton.self).first { $0.title == title }
+    }
+
+    /// The `+N` buttons, in drawn order, found by their Accessibility identifier rather than
+    /// by title, the way a Tier 2 driver would find them.
+    static func amountButtons(in flow: PINFlow) -> [NSButton] {
+        flow.view.allDescendants(of: NSButton.self)
+            .filter { $0.accessibilityIdentifier().hasPrefix("amount-") }
+    }
+
+    /// AppKit has no public getter for a button's type. The cell answers `buttonType` by
+    /// key-value coding, and `.radio` is what `NSButton(radioButtonWithTitle:)` set on the
+    /// pickers this step used to draw.
+    static func isRadio(_ button: NSButton) -> Bool {
+        (button.cell?.value(forKey: "buttonType") as? UInt) == NSButton.ButtonType.radio.rawValue
     }
 }
 

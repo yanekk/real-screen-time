@@ -311,7 +311,7 @@ The parent's web page (sign in, add 15 / 30 / 60 minutes, pair or unpair the Mac
 backend behind it live in [`server/`](server/), built by the `remote-grant` plan. It is
 TypeScript on Node, deployed to the parent's AWS account, and meets the Mac app only over HTTP.
 **Read [`server/CLAUDE.md`](server/CLAUDE.md) before working there.** It holds the commands,
-and the standing permission to deploy with `npm run deploy:web` once the `admin` AWS
+the rule that every web UI test runs the real page in happy-dom, and the standing permission to deploy with `npm run deploy:web` once the `admin` AWS
 credentials are checked. The Swift-only rules in this file (Core/App boundary, no third-party
 dependencies, `make test`) do not apply to that folder.
 

@@ -385,44 +385,45 @@ final class PINFlow: NSObject {
 
     // MARK: - Stage two: the amount
 
-    /// `Dodaj minuty` — the list from `config.extensionChoices`, first entry pre-selected,
-    /// drawn in the parent's own order (DESIGN §2.5). ``GrantModel`` owns both rules.
+    /// `Dodaj minuty` — one button per entry of `config.extensionChoices`, in the parent's
+    /// own order (DESIGN §2.5). ``GrantModel`` owns the list and its fallback.
+    ///
+    /// **One press grants** (cover-buttons-logout DESIGN §2.1), replacing radios plus a
+    /// `Dodaj` confirm. No confirmation: the parent has just typed the PIN, so the mis-tap a
+    /// confirm would guard against has already been guarded against.
     private func buildAmounts() {
         let model = GrantModel(config: config())
-        var radios: [NSButton] = []
+        var amounts: [NSButton] = []
         for (index, amount) in model.amounts.enumerated() {
-            let radio = NSButton(radioButtonWithTitle: Strings.minutes(amount),
-                                 target: self, action: #selector(amountPicked(_:)))
-            radio.tag = amount
-            radio.font = .systemFont(ofSize: 18 * scale, weight: .regular)
-            radio.state = index == model.preselected ? .on : .off
-            radios.append(radio)
+            let amountButton = button(Strings.grantAmountButton(amount),
+                                      #selector(amountPressed(_:)),
+                                      // Enter grants the first amount, as it granted the
+                                      // pre-selected radio before. `make ui-gate`'s
+                                      // `right-pin` scenario presses Return and relies on it.
+                                      primary: index == model.preselected)
+            amountButton.tag = amount
+            amountButton.setAccessibilityIdentifier("amount-\(amount)")
+            amounts.append(amountButton)
         }
-        picked = model.defaultAmount
 
         // Stacked vertically once there are more than three, so a long list does not run off
-        // the side of a small cover. Radio buttons group by superview, so they all share
-        // this one stack.
-        let grid = NSStackView(views: radios)
-        grid.orientation = radios.count > 3 ? .vertical : .horizontal
-        grid.alignment = radios.count > 3 ? .leading : .centerY
+        // the side of a 600×400 boxed cover.
+        let grid = NSStackView(views: amounts)
+        grid.orientation = amounts.count > 3 ? .vertical : .horizontal
+        grid.alignment = amounts.count > 3 ? .centerX : .centerY
         grid.spacing = 14 * scale
 
         replaceContents(with: [
             label(Strings.grantTitle, size: 30, weight: .semibold, colour: .labelColor),
             grid,
-            row([button(Strings.pinCancelButton, #selector(cancelPressed)),
-                 button(Strings.grantConfirmButton, #selector(grantPressed), primary: true)]),
+            row([button(Strings.pinCancelButton, #selector(cancelPressed))]),
         ])
     }
 
-    /// The amount the picker is on. Set from ``GrantModel/defaultAmount`` before the radios
-    /// are drawn, so Enter grants it without anything being clicked first.
-    private var picked = 0
-
-    @objc private func amountPicked(_ sender: NSButton) { picked = sender.tag }
-
-    @objc private func grantPressed() { complete(.extend(minutes: picked)) }
+    /// The amount is the button's tag. ``complete(_:)`` latches, so a double click grants once.
+    @objc private func amountPressed(_ sender: NSButton) {
+        complete(.extend(minutes: sender.tag))
+    }
 
     // MARK: - Finishing
 
@@ -458,10 +459,10 @@ final class PINFlow: NSObject {
 
     private func button(_ title: String, _ selector: Selector,
                         primary: Bool = false) -> NSButton {
-        let button = NSButton(title: title, target: self, action: selector)
-        button.bezelStyle = .rounded
-        button.controlSize = .large
-        button.font = .systemFont(ofSize: 16 * scale, weight: .medium)
+        // The cover's style, here too: the parent chose the menu-bar panel to follow the
+        // cover (T05, 2026-10-03), so there is one look and one code path for this step.
+        let button = CoverButton(title: title, role: primary ? .primary : .neutral,
+                                 fontSize: 16 * scale, target: self, action: selector)
         if primary { button.keyEquivalent = "\r" }
         return button
     }
@@ -677,7 +678,7 @@ final class PINPanel: NSObject, NSWindowDelegate {
                  diagnostics: Diagnostics,
                  finish: @escaping (PINFlow.Outcome) -> Void) {
         self.finish = finish
-        panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 400, height: 300),
+        panel = NSPanel(contentRect: NSRect(origin: .zero, size: Self.contentSize),
                         styleMask: [.titled, .closable, .utilityWindow],
                         backing: .buffered, defer: false)
         super.init()
@@ -702,18 +703,7 @@ final class PINPanel: NSObject, NSWindowDelegate {
         panel.appearance = NSAppearance(named: .darkAqua)
         panel.delegate = self
 
-        let content = NSView()
-        flow.view.translatesAutoresizingMaskIntoConstraints = false
-        content.addSubview(flow.view)
-        NSLayoutConstraint.activate([
-            flow.view.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            flow.view.centerYAnchor.constraint(equalTo: content.centerYAnchor),
-            flow.view.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor,
-                                               constant: 24),
-            flow.view.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor,
-                                                constant: -24),
-        ])
-        panel.contentView = content
+        panel.contentView = Self.host(flow.view)
 
         panel.center()
         // The app runs `.accessory` — no Dock icon — so it is not frontmost when a menu item
@@ -721,6 +711,35 @@ final class PINPanel: NSObject, NSWindowDelegate {
         NSApp.activate()
         panel.makeKeyAndOrderFront(nil)
         flow.takeKeyboard()
+    }
+
+    /// The panel's content size. A constant rather than a literal in `init` so the headed
+    /// drill (cover-buttons-logout T04) lays the flow out at exactly this size.
+    static let contentSize = NSSize(width: 400, height: 300)
+
+    /// The panel's content view around a flow: centred, 24 pt clear of either side. Split out
+    /// of `init` so a headed test can lay the flow out as the panel does without opening the
+    /// panel, which would order a window on screen.
+    static func host(_ flowView: NSView) -> NSView {
+        let content = NSView(frame: NSRect(origin: .zero, size: contentSize))
+        flowView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(flowView)
+        NSLayoutConstraint.activate([
+            flowView.centerXAnchor.constraint(equalTo: content.centerXAnchor),
+            flowView.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            flowView.leadingAnchor.constraint(greaterThanOrEqualTo: content.leadingAnchor,
+                                              constant: 24),
+            flowView.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor,
+                                               constant: -24),
+            // **Required, so the panel grows rather than clips.** The amount step is a column
+            // above three amounts, and the parent's list has no upper bound: six at scale 1
+            // ran 16 pt off both edges of 300 pt (T04 drill). These make the window taller
+            // when the content needs it and leave it at `contentSize` when it does not.
+            flowView.topAnchor.constraint(greaterThanOrEqualTo: content.topAnchor, constant: 20),
+            flowView.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor,
+                                             constant: -20),
+        ])
+        return content
     }
 
     /// The red button, `Cmd+W`, or anything else AppKit calls closing. Same as `Anuluj`.

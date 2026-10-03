@@ -286,6 +286,39 @@ struct FlagsTests {
         #expect(flags.warnings.count == 1, "a dropped endpoint must be reported, never silent")
     }
 
+    // MARK: - Log out (cover-buttons-logout §2.5)
+
+    /// Every row of §2.5's table: debug is a dry run unless asked, release is real unless
+    /// told not to be, and the dry-run flag wins in both.
+    @Test("logoutIsReal follows the build and the two flags", arguments: [
+        (false, [:], false),
+        (false, ["RST_ALLOW_LOGOUT": "1"], true),
+        (false, ["RST_ALLOW_LOGOUT": "1", "RST_LOGOUT_DRY_RUN": "1"], false),
+        (false, ["RST_LOGOUT_DRY_RUN": "1"], false),
+        (true, [:], true),
+        (true, ["RST_LOGOUT_DRY_RUN": "1"], false),
+        (true, ["RST_ALLOW_LOGOUT": "1", "RST_LOGOUT_DRY_RUN": "1"], false),
+        (true, ["RST_ALLOW_LOGOUT": "0"], true),
+    ] as [(Bool, [String: String], Bool)])
+    func logoutIsReal(_ release: Bool, _ environment: [String: String], _ expected: Bool) {
+        let flags = Flags.parse(environment, enforcementDefault: release)
+        #expect(flags.logoutIsReal == expected)
+        #expect(flags.warnings.isEmpty)
+    }
+
+    /// Only `1` counts. A typo must neither make a debug log-out real nor take the dry run
+    /// off a release build — and either way it is reported, never silent.
+    @Test("a log-out flag that is not 1 or 0 counts as unset, and says so",
+          arguments: ["yes", "true", "01", " 1", ""])
+    func logoutNearMisses(_ value: String) {
+        let allow = Flags.parse(["RST_ALLOW_LOGOUT": value], enforcementDefault: false)
+        #expect(!allow.logoutIsReal)
+        #expect(allow.warnings.count == 1)
+        let dry = Flags.parse(["RST_LOGOUT_DRY_RUN": value], enforcementDefault: true)
+        #expect(dry.logoutIsReal, "a mistyped dry-run flag reads as unset, which in release is real")
+        #expect(dry.warnings.count == 1)
+    }
+
     @Test("an environment with none of our variables in it is silent")
     func unrelatedEnvironment() {
         let flags = Flags.parse(["PATH": "/usr/bin", "HOME": "/Users/child"],

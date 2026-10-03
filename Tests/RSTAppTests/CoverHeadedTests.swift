@@ -209,7 +209,7 @@ struct CoverHeadedTests {
         Self.button(titled: Strings.pinCancelButton, in: content)?.performClick(nil)
     }
 
-    /// A right PIN, then the amount picked and confirmed, reaches the enforcer's grant — which
+    /// A right PIN, then one press on a `+N` amount button, reaches the enforcer's grant — which
     /// is what takes the cover down on the next tick. Modelled here by a recording double
     /// standing in for the enforcer and the tick, so the dismissal is asserted without one.
     /// Runs `async`, outside `withApp`, for the same reason as the wrong-PIN check above.
@@ -225,15 +225,145 @@ struct CoverHeadedTests {
         let boxes = try #require(content.firstDescendant(of: PINBoxes.self))
 
         Self.type("1379", into: boxes)
-        // A correct PIN swaps the boxes for the amount picker; its confirm button is `Dodaj`.
-        await Self.pump(until: { Self.button(titled: Strings.grantConfirmButton, in: content) != nil })
-        let confirm = try #require(Self.button(titled: Strings.grantConfirmButton, in: content))
-        confirm.performClick(nil)
+        // A correct PIN swaps the boxes for one button per amount; one press grants, with no
+        // separate confirm (cover-buttons-logout DESIGN §2.1).
+        let plus30 = Strings.grantAmountButton(30)
+        await Self.pump(until: { Self.button(titled: plus30, in: content) != nil })
+        let amount = try #require(Self.button(titled: plus30, in: content))
+        amount.performClick(nil)
 
         await Self.pump(until: { rig.enforcer.dismissed })
         #expect(rig.enforcer.dismissed)
-        if case .extend = rig.enforcer.outcomes.last {} else {
-            Issue.record("expected an extend outcome, got \(rig.enforcer.outcomes)")
+        #expect(rig.enforcer.outcomes == [.extend(minutes: 30)])
+        // The prompt closed and the cover's own face came back in its place.
+        #expect(content.firstDescendant(of: PINBoxes.self) == nil)
+        #expect(Self.button(withIdentifier: CoverModel.Button.pin.rawValue, in: content) != nil)
+        #expect(Self.button(titled: plus30, in: content) == nil)
+    }
+
+    // MARK: - Wyloguj (cover-buttons-logout T03)
+
+    @Test("the time's-up faces draw PIN, lock and Wyloguj in that order, with their ids")
+    func endOfTurnButtonOrder() {
+        HeadedHarness.withApp { _ in
+            for decision in [Decision.expired(selfServiceLeft: 0), .awaitingStart(selfServiceLeft: 0)] {
+                let content = CoverContentView(onPress: { _ in }, makePINFlow: { _, _ in nil })
+                content.render(Self.model(decision))
+                let buttons = content.allDescendants(of: NSButton.self)
+                #expect(buttons.map(\.title) == [Strings.gated(Strings.coverPINButton),
+                                                 Strings.coverLockButton,
+                                                 Strings.coverLogOutButton], "\(decision)")
+                #expect(buttons.map { $0.accessibilityIdentifier() } == ["pin", "lock", "logout"])
+                #expect(buttons.map { $0.identifier?.rawValue } == ["pin", "lock", "logout"])
+            }
+        }
+    }
+
+    @Test("with nothing to lock with, there is no lock button and no second Zablokuj")
+    func cannotLockDropsTheLockButton() {
+        HeadedHarness.withApp { _ in
+            let model = CoverModel(decision: .expired(selfServiceLeft: 0), sessionsUsedToday: 0,
+                                   config: Config(), canLock: false)!
+            let content = CoverContentView(onPress: { _ in }, makePINFlow: { _, _ in nil })
+            content.render(model)
+            let buttons = content.allDescendants(of: NSButton.self)
+            #expect(Self.button(withIdentifier: "lock", in: content) == nil)
+            #expect(!buttons.contains { $0.title == Strings.coverLockButton })
+            #expect(buttons.map { $0.identifier?.rawValue } == ["pin", "logout"])
+            // Exactly one Wyloguj: the confirmed one.
+            #expect(buttons.filter { $0.title == Strings.coverLogOutButton }.count == 1)
+        }
+    }
+
+    @Test("Wyloguj opens the Polish confirmation and does nothing yet")
+    func logoutOpensConfirmation() async throws {
+        let rig = Self.makeLogoutRig()
+        await Self.openLogoutConfirm(on: rig.content)
+
+        let labels = rig.content.allDescendants(of: NSTextField.self).map(\.stringValue)
+        #expect(labels == [Strings.coverLogOutConfirmTitle, Strings.coverLogOutConfirmLine])
+        #expect(Strings.coverLogOutConfirmTitle == "Wylogować?")
+        #expect(Strings.coverLogOutConfirmLine == "Niezapisana praca zostanie utracona.")
+        let buttons = rig.content.allDescendants(of: NSButton.self)
+        #expect(buttons.map(\.title) == [Strings.pinCancelButton, Strings.coverLogOutConfirmButton])
+        #expect(buttons.map { $0.accessibilityIdentifier() } == ["logout-cancel", "logout-confirm"])
+        #expect(rig.performer.calls == 0)
+        #expect(rig.sink.events(ofType: .loggedOut).isEmpty)
+    }
+
+    @Test("a stray Enter cannot log out: no Return on either button, Anuluj holds the keyboard")
+    func confirmationIgnoresReturn() async throws {
+        let rig = Self.makeLogoutRig()
+        await Self.openLogoutConfirm(on: rig.content)
+        let cancel = try #require(Self.button(withIdentifier: "logout-cancel", in: rig.content))
+        let confirm = try #require(Self.button(withIdentifier: "logout-confirm", in: rig.content))
+        #expect(cancel.keyEquivalent != "\r")
+        #expect(confirm.keyEquivalent != "\r")
+        #expect(cancel.keyEquivalent.isEmpty && confirm.keyEquivalent.isEmpty)
+        #expect(rig.content.initialResponder === cancel)
+    }
+
+    @Test("Anuluj puts the face back and logs nobody out")
+    func cancelRestoresFace() async throws {
+        let rig = Self.makeLogoutRig()
+        await Self.openLogoutConfirm(on: rig.content)
+        try #require(Self.button(withIdentifier: "logout-cancel", in: rig.content)).performClick(nil)
+        await Self.pump(until: { Self.button(withIdentifier: "logout", in: rig.content) != nil })
+
+        #expect(rig.content.allDescendants(of: NSButton.self).map { $0.identifier?.rawValue }
+                == ["pin", "lock", "logout"])
+        #expect(rig.performer.calls == 0)
+        #expect(rig.sink.events(ofType: .loggedOut).isEmpty)
+    }
+
+    @Test("confirming writes logged_out before the performer runs, once, and the face comes back",
+          arguments: [true, false])
+    func confirmLogsOutOnce(performerSucceeds: Bool) async throws {
+        let rig = Self.makeLogoutRig(performerSucceeds: performerSucceeds)
+        await Self.openLogoutConfirm(on: rig.content)
+        let confirm = try #require(Self.button(withIdentifier: "logout-confirm", in: rig.content))
+        // A double click: both land before the face comes back, which is a hop away.
+        confirm.performClick(nil)
+        confirm.performClick(nil)
+        await Self.pump(until: { Self.button(withIdentifier: "logout", in: rig.content) != nil })
+
+        #expect(rig.performer.calls == 1)
+        #expect(rig.sink.events(ofType: .loggedOut).count == 1)
+        // The event was already in the sink when the performer was called.
+        #expect(rig.performer.loggedOutEventsAtCall == [1])
+        // The face is back whatever the performer answered (§2.2).
+        #expect(rig.content.allDescendants(of: NSButton.self).map { $0.identifier?.rawValue }
+                == ["pin", "lock", "logout"])
+        #expect(Self.button(withIdentifier: "logout-confirm", in: rig.content) == nil)
+    }
+
+    @Test("a face change under the confirmation replaces it and logs nobody out")
+    func faceChangeReplacesConfirmation() async throws {
+        let rig = Self.makeLogoutRig()
+        await Self.openLogoutConfirm(on: rig.content)
+        let confirm = try #require(Self.button(withIdentifier: "logout-confirm", in: rig.content))
+
+        // A remote grant landed: the session is back and the cover offers Wznów instead.
+        rig.content.render(Self.model(.awaitingResume(remaining: 900)))
+        #expect(Self.button(withIdentifier: "logout-confirm", in: rig.content) == nil)
+        #expect(Self.button(withIdentifier: "resume", in: rig.content) != nil)
+        // The detached button cannot act either.
+        confirm.performClick(nil)
+        await Self.pump(until: { false }, timeout: 0.1)
+        #expect(rig.performer.calls == 0)
+        #expect(rig.sink.events(ofType: .loggedOut).isEmpty)
+    }
+
+    @Test("every confirmation string resolves through Strings")
+    func confirmationStringsComeFromStrings() async throws {
+        let rig = Self.makeLogoutRig()
+        await Self.openLogoutConfirm(on: rig.content)
+        let expected: Set<String> = [Strings.coverLogOutConfirmTitle, Strings.coverLogOutConfirmLine,
+                                     Strings.pinCancelButton, Strings.coverLogOutConfirmButton]
+        let shown = rig.content.allDescendants(of: NSTextField.self).map(\.stringValue)
+            + rig.content.allDescendants(of: NSButton.self).map(\.title)
+        for text in shown where !text.isEmpty {
+            #expect(expected.contains(text), "‘\(text)’ on the confirmation is not a Strings value")
         }
     }
 
@@ -277,16 +407,15 @@ struct CoverHeadedTests {
         CoverModel(decision: decision, sessionsUsedToday: used, config: config)!
     }
 
-    /// The title the cover draws for a button, computed the same way the view does, so the
-    /// assertion follows the lock mechanism actually resolved rather than guessing it.
+    /// The title the cover draws for a button. `.lock` is always the lock: when nothing can
+    /// lock, the model drops the button rather than relabelling it (cover-buttons-logout §2.4).
     static func expectedTitle(_ kind: CoverModel.Button) -> String {
         switch kind {
         case .start: return Strings.coverStartButton
         case .resume: return Strings.coverResumeButton
         case .pin: return Strings.gated(Strings.coverPINButton)
-        case .lock:
-            return ScreenLock.mechanism == .lockImmediately
-                ? Strings.coverLockButton : Strings.coverLogOutButton
+        case .lock: return Strings.coverLockButton
+        case .logout: return Strings.coverLogOutButton
         }
     }
 
@@ -352,6 +481,63 @@ struct CoverHeadedTests {
 
     static func button(titled title: String, in view: NSView) -> NSButton? {
         view.allDescendants(of: NSButton.self).first { $0.title == title }
+    }
+}
+
+// MARK: - The log-out rig
+
+/// Records each log-out and how many `logged_out` events were already in the sink at that
+/// moment — the event-before-action rule, checked at the instant it matters.
+@MainActor
+final class RecordingLogout: LogoutPerforming {
+    private let sink: MemoryEventSink
+    private let succeeds: Bool
+    private(set) var calls = 0
+    private(set) var loggedOutEventsAtCall: [Int] = []
+
+    init(sink: MemoryEventSink, succeeds: Bool = true) {
+        self.sink = sink
+        self.succeeds = succeeds
+    }
+
+    func logOut(at now: Date) -> Bool {
+        calls += 1
+        loggedOutEventsAtCall.append(sink.events(ofType: .loggedOut).count)
+        return succeeds
+    }
+}
+
+extension CoverHeadedTests {
+    @MainActor
+    struct LogoutRig {
+        let content: CoverContentView
+        let performer: RecordingLogout
+        let sink: MemoryEventSink
+    }
+
+    /// A cover face wired to a real `Engine` through `LogoutCommand` — the command
+    /// `CoverEnforcer` runs — but never through `CoverEnforcer.apply`, which orders a window.
+    /// Synchronous on press, so the order of event and performer is the command's own.
+    static func makeLogoutRig(performerSucceeds: Bool = true) -> LogoutRig {
+        _ = NSApplication.shared
+        let sink = MemoryEventSink()
+        let engine = Engine(state: SessionState(), config: Config(), sink: sink,
+                            enforcer: NullEnforcer(), calendar: .current)
+        let performer = RecordingLogout(sink: sink, succeeds: performerSucceeds)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let content = CoverContentView(onPress: { button in
+            if button == .logout {
+                LogoutCommand(engine: engine, performer: performer).apply(at: now)
+            }
+        }, makePINFlow: { _, _ in nil })
+        content.render(model(.expired(selfServiceLeft: 0)))
+        return LogoutRig(content: content, performer: performer, sink: sink)
+    }
+
+    /// Press the face's `Wyloguj` and wait out the one hop to the confirmation.
+    static func openLogoutConfirm(on content: CoverContentView) async {
+        button(withIdentifier: CoverModel.Button.logout.rawValue, in: content)?.performClick(nil)
+        await pump(until: { button(withIdentifier: "logout-confirm", in: content) != nil })
     }
 }
 

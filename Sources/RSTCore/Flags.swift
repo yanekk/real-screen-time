@@ -106,6 +106,16 @@ public struct Flags: Equatable, Sendable {
     /// the precedence in one place (App) keeps this to grammar alone.
     public var remoteEndpointOverride: String?
 
+    /// Whether `Wyloguj` really logs the account out, or only says it would
+    /// (cover-buttons-logout DESIGN §2.5).
+    ///
+    /// A real log-out kills the developer's own session — terminal, tests and all — so a
+    /// debug build is a dry run unless `RST_ALLOW_LOGOUT=1`, and `RST_LOGOUT_DRY_RUN=1`
+    /// wins over everything, in either build, so `make ui-gate` stays safe even when it is
+    /// pointed at a release binary. Same shape as ``enforcing``: the build's default comes
+    /// in from `RSTApp`, the rule lives here where `make test` can see it.
+    public var logoutIsReal: Bool
+
     /// What was ignored, and why — one line each, for `app.log`.
     ///
     /// A mistyped flag that silently does nothing is the worst outcome of the four
@@ -123,6 +133,7 @@ public struct Flags: Equatable, Sendable {
                 timeScale: Double = 1,
                 dataDirectory: String? = nil,
                 remoteEndpointOverride: String? = nil,
+                logoutIsReal: Bool = false,
                 warnings: [String] = []) {
         self.enforcing = enforcing
         self.maxCoverSeconds = maxCoverSeconds
@@ -134,6 +145,7 @@ public struct Flags: Equatable, Sendable {
         self.timeScale = timeScale
         self.dataDirectory = dataDirectory
         self.remoteEndpointOverride = remoteEndpointOverride
+        self.logoutIsReal = logoutIsReal
         self.warnings = warnings
     }
 
@@ -149,6 +161,8 @@ public struct Flags: Equatable, Sendable {
         public static let timeScale = "RST_TIME_SCALE"
         public static let dataDirectory = "RST_DATA_DIR"
         public static let remoteEndpoint = "RST_REMOTE_ENDPOINT"
+        public static let allowLogout = "RST_ALLOW_LOGOUT"
+        public static let logoutDryRun = "RST_LOGOUT_DRY_RUN"
     }
 
     /// - Parameters:
@@ -273,6 +287,22 @@ public struct Flags: Equatable, Sendable {
             }
         }
 
+        // §2.5's table. Read like `RST_SEATBELT_SELFTEST`: only `1` counts, so a typo can
+        // neither make a debug log-out real nor take the dry run off a release one —
+        // `RST_LOGOUT_DRY_RUN=yes` warns and reads as unset, which in a release build means
+        // real. The dry-run flag is checked first so it wins in both builds.
+        let allowLogoutText = environment[Name.allowLogout]
+        let logoutDryRunText = environment[Name.logoutDryRun]
+        for (name, text) in [(Name.allowLogout, allowLogoutText),
+                             (Name.logoutDryRun, logoutDryRunText)] {
+            if let text, text != "1", text != "0" {
+                warnings.append("\(name)=\(text) is not 1 or 0 — read as 0")
+            }
+        }
+        let logoutIsReal = logoutDryRunText == "1" ? false
+            : enforcementDefault ? true
+            : allowLogoutText == "1"
+
         return Flags(enforcing: enforcing,
                      maxCoverSeconds: maxCoverSeconds,
                      coverFrame: coverFrame,
@@ -283,6 +313,7 @@ public struct Flags: Equatable, Sendable {
                      timeScale: timeScale,
                      dataDirectory: dataDirectory,
                      remoteEndpointOverride: remoteEndpointOverride,
+                     logoutIsReal: logoutIsReal,
                      warnings: warnings)
     }
 }

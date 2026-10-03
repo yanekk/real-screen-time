@@ -52,6 +52,15 @@ final class CoverContentView: NSView {
     /// as long as he likes over four digits (T13).
     private var flow: PINFlow?
 
+    /// The `Wylogować?` confirmation's latch, set by its first `Wyloguj` press and cleared
+    /// when a fresh confirmation is drawn. Two quick clicks land before the face comes back
+    /// (that is a hop away), and without this the second would run bootout twice (§2.7).
+    private var logoutConfirmed = false
+    /// Whether the confirmation is what the stack holds. ``render(_:)`` must not let an
+    /// unchanged model leave it standing over a face it no longer belongs to — and must
+    /// replace it when the face really changes, as it replaces the PIN prompt.
+    private var confirmingLogout = false
+
     /// The button that takes the keyboard when the cover appears — the primary action of
     /// whichever face is showing. While the PIN prompt is up the field takes it instead, and
     /// the child never has to click into it.
@@ -98,6 +107,7 @@ final class CoverContentView: NSView {
         // answer — what the prompt was standing in front of is no longer what is there.
         flow?.dismissed()
         flow = nil
+        confirmingLogout = false
 
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         initialResponder = nil
@@ -119,6 +129,16 @@ final class CoverContentView: NSView {
         row.spacing = 16
         stack.addArrangedSubview(row)
         stack.setCustomSpacing(40, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 2])
+        settle()
+    }
+
+    /// **Lay the new contents out now, not at the next display pass.** Between the swap and
+    /// that pass an Accessibility reader can find the new buttons and read their frames before
+    /// the stack has placed them; `make ui-gate` did exactly that on `Wylogować?` and clicked
+    /// empty cover where `Wyloguj` was about to be (T05, 2026-10-03). A person cannot click
+    /// that fast, but a frame reported is a frame that should be true.
+    private func settle() {
+        layoutSubtreeIfNeeded()
     }
 
     // MARK: - Pieces
@@ -145,16 +165,15 @@ final class CoverContentView: NSView {
     }
 
     private func button(_ kind: CoverModel.Button) -> NSButton {
-        let button = NSButton(title: title(for: kind), target: self, action: #selector(pressed(_:)))
+        let button = CoverButton(title: title(for: kind), role: role(for: kind),
+                                 fontSize: 18 * scale, target: self,
+                                 action: #selector(pressed(_:)))
         button.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
         // The `NSUserInterfaceItemIdentifier` above is read by `pressed(_:)` to resolve the
         // kind, but AppKit does not surface it to the Accessibility system — an external
         // driver cannot see it (T00 finding). This is the same name again, set the one way a
         // cross-process `AXUIElement` reader can find (T06); T07 is the gate that uses it.
         button.setAccessibilityIdentifier(kind.rawValue)
-        button.bezelStyle = .rounded
-        button.controlSize = .large
-        button.font = .systemFont(ofSize: 18 * scale, weight: .medium)
 
         // The padlock stays now that the field exists (T13): it is honest, and it is how
         // the child can see which door needs a parent before pressing it.
@@ -168,16 +187,25 @@ final class CoverContentView: NSView {
         return button
     }
 
+    /// The colour the parent picked by (T05): blue forward, grey neutral, orange-red out.
+    private func role(for kind: CoverModel.Button) -> CoverButton.Role {
+        switch kind {
+        case .start, .resume, .pin: return .primary
+        case .lock: return .neutral
+        case .logout: return .warning
+        }
+    }
+
     private func title(for kind: CoverModel.Button) -> String {
         switch kind {
         case .start: return Strings.coverStartButton
         case .resume: return Strings.coverResumeButton
         case .pin: return Strings.gated(Strings.coverPINButton)
         case .lock:
-            // The label follows the mechanism that was actually resolved at startup, so
-            // there is never a button that lies about what it will do.
-            return ScreenLock.mechanism == .lockImmediately
-                ? Strings.coverLockButton : Strings.coverLogOutButton
+            // Always the lock now: when nothing can lock, `CoverModel` does not offer the
+            // button at all (`canLock: false`, cover-buttons-logout §2.4).
+            return Strings.coverLockButton
+        case .logout: return Strings.coverLogOutButton
         }
     }
 
@@ -193,6 +221,12 @@ final class CoverContentView: NSView {
         // the stack — the sender must outlive its own click.
         guard kind != .pin else {
             return DispatchQueue.main.async { [weak self] in self?.showPIN() }
+        }
+        // **Not forwarded either**: `Wyloguj` asks first, in this window, for the same reason
+        // the PIN prompt lives here (cover-buttons-logout §2.2). Same one hop, for the same
+        // sender-must-outlive-its-click reason.
+        guard kind != .logout else {
+            return DispatchQueue.main.async { [weak self] in self?.showLogoutConfirm() }
         }
         onPress(kind)
     }
@@ -210,8 +244,78 @@ final class CoverContentView: NSView {
         stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
         stack.addArrangedSubview(flow.view)
         initialResponder = flow.keyboardTarget
+        settle()
         // The field, not a button — from the cover the child never has to click into it.
         flow.takeKeyboard()
+    }
+
+    // MARK: - The log-out confirmation (cover-buttons-logout §2.2)
+
+    /// Swap the face for `Wylogować?`. Drawn in place, never as an `NSAlert` or panel: a
+    /// separate window loses the keyboard to the tick's `NSApp.activate()` within a second.
+    ///
+    /// **`Anuluj` holds the keyboard and neither button answers Enter**, so a stray Return
+    /// cannot log him out and lose his unsaved work. Escape already does nothing
+    /// (``CoverWindow/cancelOperation(_:)``).
+    private func showLogoutConfirm() {
+        guard flow == nil, !confirmingLogout, rendered != nil else { return }
+        confirmingLogout = true
+        logoutConfirmed = false
+
+        stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        stack.addArrangedSubview(headline(Strings.coverLogOutConfirmTitle))
+        stack.addArrangedSubview(subline(Strings.coverLogOutConfirmLine))
+
+        let cancel = confirmButton(Strings.pinCancelButton, id: Self.logoutCancelID,
+                                   role: .neutral, action: #selector(cancelLogout(_:)))
+        let confirm = confirmButton(Strings.coverLogOutConfirmButton, id: Self.logoutConfirmID,
+                                    role: .warning, action: #selector(confirmLogout(_:)))
+        let row = NSStackView(views: [cancel, confirm])
+        row.orientation = .horizontal
+        row.spacing = 16
+        stack.addArrangedSubview(row)
+        stack.setCustomSpacing(40, after: stack.arrangedSubviews[stack.arrangedSubviews.count - 2])
+
+        initialResponder = cancel
+        settle()
+        window?.makeFirstResponder(cancel)
+    }
+
+    /// The Accessibility identifiers `make ui-gate` finds the confirmation's buttons by.
+    static let logoutCancelID = "logout-cancel"
+    static let logoutConfirmID = "logout-confirm"
+
+    private func confirmButton(_ title: String, id: String, role: CoverButton.Role,
+                               action: Selector) -> NSButton {
+        let button = CoverButton(title: title, role: role, fontSize: 18 * scale,
+                                 target: self, action: action)
+        button.identifier = NSUserInterfaceItemIdentifier(id)
+        button.setAccessibilityIdentifier(id)
+        // Deliberately no `keyEquivalent`: Enter must not log out.
+        return button
+    }
+
+    @objc private func cancelLogout(_ sender: NSButton) {
+        guard confirmingLogout else { return }
+        // One hop: the face replaces the sender. Re-checked on arrival, so a double click
+        // or a face change in between does not rebuild a face that is already there.
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.confirmingLogout else { return }
+            self.restoreFace()
+        }
+    }
+
+    @objc private func confirmLogout(_ sender: NSButton) {
+        guard confirmingLogout, !logoutConfirmed else { return }
+        logoutConfirmed = true
+        // The command, then the face back whatever the log-out does: a dry or failed
+        // log-out must not leave him in front of a question whose button does nothing
+        // (§2.2). A real one ends this process within seconds anyway.
+        onPress(.logout)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.confirmingLogout else { return }
+            self.restoreFace()
+        }
     }
 
     /// Put the face back after the prompt closes, whatever the answer was.
@@ -221,6 +325,7 @@ final class CoverContentView: NSView {
     /// of it would drift from the real one the first time a face changed.
     private func restoreFace() {
         flow = nil
+        confirmingLogout = false
         guard let model = rendered else { return }
         rendered = nil
         render(model)

@@ -148,6 +148,17 @@ export function describePairStatusResult(status, body) {
   return { ok: false };
 }
 
+/**
+ * The confirmation shown before a grant (the parent's rule, 2026-09-23): a mis-tap on the phone
+ * would hand the child minutes that cannot be taken back, so every amount asks first.
+ */
+export function grantConfirmMessage(minutes) {
+  return `Add ${minutes} minutes to the Mac?`;
+}
+
+/** Shown after a grant, since the buttons stay disabled until the page is reloaded. */
+export const GRANT_DONE_HINT = "Reload the page to add more.";
+
 /** The confirmation shown before unpairing: re-pairing later needs the parent at the Mac. */
 export const UNPAIR_CONFIRM =
   "Unpair this Mac? It stops receiving minutes until you pair it again from its Settings.";
@@ -196,13 +207,15 @@ export function describeSessionEstablish(status, body) {
 }
 
 /**
- * The signed-out rule (DESIGN §2.2): while signed out the amount buttons are disabled, so nothing
- * can be granted before the parent is known. Signed-in-ness is now either a Google token in hand or
- * a live saved session (a truthy flag); either way a falsy value means signed out. Returns whether
- * the amount buttons should be `disabled`.
+ * When the amount buttons are `disabled` (DESIGN §2.2). Signed out: always, so nothing can be
+ * granted before the parent is known; signed-in-ness is a Google token in hand or a live saved
+ * session (a truthy flag). Signed in: once a grant has gone through (`granted`), or while one is in
+ * flight (`busy`) — one grant per page load, so a double tap or a second tap cannot stack minutes
+ * by accident (amendment 2026-09-23). Only a reload clears `granted`; a failed grant does not set
+ * it, so the parent can retry.
  */
-export function amountButtonsDisabled(signedIn) {
-  return !signedIn;
+export function amountButtonsDisabled(signedIn, granted = false, busy = false) {
+  return !signedIn || granted || busy;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -227,6 +240,10 @@ function init() {
   //                    2026-09-23): paired shows the note and Unpair only, otherwise Connect only.
   const body = document.body;
   let signedIn = initialSignedIn(body.dataset.signedIn);
+  // One grant per page load: set on a successful grant and never cleared, so sign-out/sign-in
+  // does not re-enable the buttons either — only a reload does. `granting` covers the request.
+  let granted = false;
+  let granting = false;
 
   const els = {
     signin: document.getElementById("signin"),
@@ -262,8 +279,8 @@ function init() {
     body.dataset.signedIn = String(signedIn);
     // The stylesheet already greys the controls while signed out; `disabled` also takes them out
     // of keyboard focus, so nothing can be granted before the parent is known (DESIGN §2.2).
-    const disabled = amountButtonsDisabled(signedIn);
-    for (const b of amountButtons) b.disabled = disabled;
+    reflectAmountButtons();
+    const disabled = !signedIn;
     els.connect.disabled = disabled;
     if (disabled) {
       stopPairWatch();
@@ -273,6 +290,11 @@ function init() {
     } else if (body.dataset.paired !== "true" && body.dataset.paired !== "false") {
       refreshPairState(); // the server could not tell; ask now
     }
+  }
+
+  function reflectAmountButtons() {
+    const disabled = amountButtonsDisabled(signedIn, granted, granting);
+    for (const b of amountButtons) b.disabled = disabled;
   }
 
   function applyPaired(paired) {
@@ -399,9 +421,17 @@ function init() {
   }
 
   async function addMinutes(minutes) {
-    if (!signedIn) return;
+    if (amountButtonsDisabled(signedIn, granted, granting)) return;
+    if (!window.confirm(grantConfirmMessage(minutes))) return;
+    granting = true;
+    reflectAmountButtons();
     const { url, options } = grantRequest(undefined, minutes); // cookie authorizes
-    await call(url, options, describeGrantResult, () => {});
+    await call(url, options, describeGrantResult, (result) => {
+      granted = true;
+      result.message = `${result.message} ${GRANT_DONE_HINT}`;
+    });
+    granting = false;
+    reflectAmountButtons();
   }
 
   async function getPairingCode() {

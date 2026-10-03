@@ -1,8 +1,7 @@
 // The web page's testable half (T09, DESIGN §2.2): the pure request-building and response-reading
 // logic from web/app.js, the static-serving path through the router, and a drift guard that the
 // embedded copy (src/webAssets.ts, build:web) still matches the files under web/. The DOM wiring
-// and the real Google sign-in are not here — they need a browser and a real account, hand-verified
-// in T10 (DESIGN §5.1).
+// is in web-dom.test.ts (happy-dom); real Google sign-in needs a real account (DESIGN §5.1).
 
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -22,6 +21,7 @@ import {
   initialSignedIn,
   sessionLost,
   UNPAIR_CONFIRM,
+  grantConfirmMessage,
   amountButtonsDisabled,
   AMOUNTS,
 } from "../web/app.js";
@@ -196,6 +196,25 @@ describe("the signed-out rule (DESIGN §2.2)", () => {
 
   it("once signed in (a token in hand) the amount buttons are enabled", () => {
     expect(amountButtonsDisabled("id-token-abc")).toBe(false);
+  });
+});
+
+describe("one grant per page load (DESIGN §2.2 amendment 2026-09-23)", () => {
+  it("disables the amount buttons while a grant is in flight", () => {
+    expect(amountButtonsDisabled(true, false, true)).toBe(true);
+  });
+
+  it("keeps them disabled after a successful grant, signed in or not", () => {
+    expect(amountButtonsDisabled(true, true, false)).toBe(true);
+    expect(amountButtonsDisabled(false, true, false)).toBe(true);
+  });
+
+  it("a failed grant (granted never set) leaves them enabled for a retry", () => {
+    expect(amountButtonsDisabled(true, false, false)).toBe(false);
+  });
+
+  it("the confirmation names the amount", () => {
+    for (const m of [15, 30, 60]) expect(grantConfirmMessage(m)).toContain(`${m} minutes`);
   });
 });
 

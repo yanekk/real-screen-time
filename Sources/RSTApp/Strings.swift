@@ -66,9 +66,16 @@ enum Strings {
     static let coverPINButton = "Wprowadź PIN"
     /// Locks the screen. **No PIN**: ending your own turn is the intended exit (§2.6).
     static let coverLockButton = "Zablokuj ekran"
-    /// What ``coverLockButton`` becomes when `SACLockScreenImmediate` cannot be resolved.
-    /// A button that lies is worse than a blunter one, so the label follows the mechanism.
+    /// Logs his account out, after ``coverLogOutConfirmTitle``. **No PIN**, like the lock
+    /// (cover-buttons-logout DESIGN §2.2).
     static let coverLogOutButton = "Wyloguj"
+    /// The in-place confirmation `Wyloguj` opens. It exists because a hard log-out loses
+    /// unsaved work (cover-buttons-logout DESIGN §2.3), and the line says so.
+    static let coverLogOutConfirmTitle = "Wylogować?"
+    static let coverLogOutConfirmLine = "Niezapisana praca zostanie utracona."
+    /// Confirms. The same word as ``coverLogOutButton``; a key of its own so the two can
+    /// part if the confirmation ever needs a different verb. Cancel is ``pinCancelButton``.
+    static let coverLogOutConfirmButton = "Wyloguj"
 
     // MARK: - The PIN prompt and the two grants (T13)
 
@@ -122,7 +129,10 @@ enum Strings {
     /// The amount picker's headline. ``menuExtend`` with its ellipsis dropped: the ellipsis
     /// promises a dialog, and this *is* the dialog.
     static let grantTitle = "Dodaj minuty"
-    static let grantConfirmButton = "Dodaj"
+
+    /// `+15` — one button per amount on that step; one press grants (cover-buttons-logout
+    /// DESIGN §2.1). The same wording as the parent's web page, so both read alike.
+    static func grantAmountButton(_ minutes: Int) -> String { "+\(minutes)" }
 
     /// `1 minuta`, `2 minuty`, `20 minut` — Polish counts its nouns in three forms.
     ///
