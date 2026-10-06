@@ -49,14 +49,13 @@ let axLogoutConfirm = "logout-confirm"
 
 // MARK: - Key codes
 
-// ANSI virtual key codes for the digit row and Return. The digit row is stable across Latin
+// ANSI virtual key codes for the digit row. The digit row is stable across Latin
 // keyboard layouts (US and Polish agree on it), which is why a keycode is enough and no unicode
 // override is set; the machine's real layout is confirmed on the hand-run first pass.
 let digitKeyCodes: [Character: CGKeyCode] = [
     "0": 0x1D, "1": 0x12, "2": 0x13, "3": 0x14, "4": 0x15,
     "5": 0x17, "6": 0x16, "7": 0x1A, "8": 0x1C, "9": 0x19,
 ]
-let returnKeyCode: CGKeyCode = 0x24
 
 // MARK: - Accessibility reads
 
@@ -327,7 +326,7 @@ func scenarioWrongPIN(appPath: String) -> Bool {
     return passed
 }
 
-/// The correct PIN, then confirming the pre-selected amount, lifts the cover and logs the grant.
+/// The correct PIN, then a click on `+15`, lifts the cover and logs the grant.
 func scenarioRightPIN(appPath: String) -> Bool {
     let dataDir = scratchBase.appendingPathComponent("right-pin")
     seedConfig(dataDir: dataDir, selfService: 0)
@@ -347,16 +346,18 @@ func scenarioRightPIN(appPath: String) -> Bool {
     notePINBoxesReachability(app: element)
     typePIN(correctPIN)
 
-    // After the correct PIN verifies (~1s off-main) the prompt swaps to the amount buttons, whose
-    // first `+N` answers Return (keyEquivalent "\r") and grants at once. Press Return on a poll until the grant
-    // lands: before the picker is up Return is a no-op (the boxes ignore it), after the cover
-    // lifts there is no key window to receive it, so repeating it is harmless.
-    let deadline = Date().addingTimeInterval(12)
+    // After the correct PIN verifies (~1s off-main) the prompt swaps to the amount buttons. No
+    // amount answers Return (sort-grant-amounts), so the grant is a click on `amount-15`.
+    guard let amount = waitForControl(app: element, identifier: "amount-15", timeout: 12),
+          clickCentre(of: amount) else {
+        report(false, "right-pin", "the +15 button never appeared or had no frame (\(dataDir.path))")
+        return false
+    }
+    let deadline = Date().addingTimeInterval(8)
     var granted = false
     repeat {
-        typeKey(returnKeyCode)
         if eventCount(dataDir: dataDir, type: "extended") >= 1 { granted = true; break }
-        usleep(700_000)
+        usleep(300_000)
     } while Date() < deadline
 
     let lifted = waitForNoWindows(app: element, timeout: 8)

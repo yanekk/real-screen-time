@@ -49,6 +49,20 @@ struct SettingsHeadedTests {
         }
     }
 
+    /// A grant list stored unsorted opens ascending, the order `Dodaj minuty` draws it in
+    /// (sort-grant-amounts).
+    @Test("an unsorted grant list fills the field ascending")
+    func grantsFieldOpensSorted() {
+        HeadedHarness.withApp { _ in
+            var config = Self.distinctiveConfig
+            config.extensionOptions = [15, 30, 60, 5, 10]
+            let recorder = Recorder(config: config)
+            let settings = SettingsWindow.buildForTesting(host: recorder.host(), clock: Self.clock)
+            #expect(Self.tokens(settings.testControls[.extensionOptions])
+                    == ["5", "10", "15", "30", "60"])
+        }
+    }
+
     // MARK: - Invalid input
 
     /// A non-numeric value blocks the save and sends the keyboard to the box that caused it — not

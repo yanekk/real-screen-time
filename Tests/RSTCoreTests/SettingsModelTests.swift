@@ -180,19 +180,51 @@ struct SettingsModelTests {
         #expect(draft.problem == .duplicate(.extensionOptions, 15))
     }
 
-    /// **Order is a setting** (DESIGN §2.5): the first entry is what T13's dialog
-    /// pre-selects, so reordering the list is how the one-keystroke default changes. Nothing
-    /// between the field and the file may sort it.
-    @Test("the grant list's order survives the save, and the first entry stays first")
-    func grantOrderSurvives() {
+    /// **The grant amounts are kept ascending** (sort-grant-amounts): the window opens on them
+    /// sorted and Save writes them sorted, so `config.json` matches what is shown.
+    @Test("the grant list is saved ascending")
+    func grantListSavedSorted() {
         var draft = shipped
         draft.extensionOptions = [60, 15, 30]
         #expect(draft.problem == nil)
 
         let saved = Config().applying(draft)
-        #expect(saved.extensionOptions == [60, 15, 30])
-        #expect(saved.extensionChoices == [60, 15, 30])
-        #expect(GrantModel(config: saved).defaultAmount == 60)
+        #expect(saved.extensionOptions == [15, 30, 60])
+        #expect(saved.extensionChoices == [15, 30, 60])
+    }
+
+    @Test("the window opens on a stored grant list sorted, other lists untouched")
+    func grantListOpensSorted() {
+        var config = Config()
+        config.extensionOptions = [15, 30, 60, 5, 10]
+        config.warningMinutes = [1, 10, 5]
+        let draft = SettingsDraft(config)
+        #expect(draft.extensionOptions == [5, 10, 15, 30, 60])
+        #expect(draft.warningMinutes == [1, 10, 5])
+    }
+
+    /// Sorting must not hide a duplicate from the check: `[30, 15, 30]` is still refused.
+    @Test("a duplicate is still refused once sorted")
+    func sortedDuplicateStillRefused() {
+        var config = Config()
+        config.extensionOptions = [30, 15, 30]
+        #expect(SettingsDraft(config).problem == .duplicate(.extensionOptions, 30))
+        config.extensionOptions = [30, 0, 15]
+        #expect(SettingsDraft(config).problem == .notPositive(.extensionOptions))
+    }
+
+    /// Saving untouched over an unsorted file is a real change: it is logged and the file is
+    /// rewritten sorted. Over a sorted file it says nothing about the grants.
+    @Test("an untouched save over an unsorted grant list logs the sort")
+    func untouchedSaveSortsTheFile() {
+        var stored = Config()
+        stored.extensionOptions = [60, 15, 30]
+        let saved = stored.applying(SettingsDraft(stored))
+        #expect(saved.extensionOptions == [15, 30, 60])
+        #expect(stored.changes(to: saved) == ["extension_options [60, 15, 30]→[15, 30, 60]"])
+
+        let sorted = Config()
+        #expect(sorted.changes(to: sorted.applying(SettingsDraft(sorted))).isEmpty)
     }
 
     // MARK: - Detection and warnings
@@ -433,7 +465,10 @@ struct SettingsModelTests {
         let loaded = store.load()
         #expect(loaded.outcome == .loaded)
         #expect(loaded.config == saved)
-        #expect(SettingsDraft(loaded.config) == draft)
+        // The grant amounts come back ascending (sort-grant-amounts); everything else as typed.
+        var expected = draft
+        expected.extensionOptions = [15, 30, 60]
+        #expect(SettingsDraft(loaded.config) == expected)
     }
 
     // MARK: - The log line

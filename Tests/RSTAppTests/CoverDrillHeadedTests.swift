@@ -10,7 +10,8 @@ import RSTCore
 /// (the smallest a cover is ever drawn, and so the smallest type `scale`, 0.45) and inside
 /// the menu-bar `PINPanel`'s 400×300 content — none pushed off the view's bounds and none
 /// squeezed narrower than its own title. Then the two keyboard paths DESIGN §2.1–§2.2 rely
-/// on: Return grants the first amount; on `Wylogować?` neither Return nor Escape does anything.
+/// on: Return grants nothing on the amount step (sort-grant-amounts); on `Wylogować?` neither
+/// Return nor Escape does anything.
 ///
 /// Laid out with `layoutSubtreeIfNeeded` on views that are never ordered on screen; the
 /// keyboard checks hand a key event to a `CoverWindow` that is built but never shown, which
@@ -109,16 +110,16 @@ struct CoverDrillHeadedTests {
 
     // MARK: - The keyboard
 
-    @Test("on the cover's amount step Return grants the first amount, once")
-    func returnGrantsFirstAmount() async throws {
+    @Test("on the cover's amount step Return grants nothing")
+    func returnGrantsNothing() async throws {
         var outcomes: [PINFlow.Outcome] = []
         let content = Self.coverWithPIN(amounts: [20, 40, 60]) { outcomes.append($0) }
         let window = Self.window(holding: content)
         content.render(Self.expiredModel)
         try await Self.reachAmounts(on: content)
 
-        #expect(window.performKeyEquivalent(with: Self.key("\r", code: 36)))
-        #expect(outcomes == [.extend(minutes: 20)])
+        #expect(!window.performKeyEquivalent(with: Self.key("\r", code: 36)))
+        #expect(outcomes.isEmpty)
     }
 
     @Test("on Wylogować? neither Return nor Escape does anything")

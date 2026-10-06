@@ -24,8 +24,8 @@ public struct Config: Codable, Equatable, Sendable {
     /// so the app still never refuses its owner — a parent who needs 90 puts 90 in the list,
     /// which is §2.5's rule moved from the moment of the grant to the shape of the menu.
     ///
-    /// **Order is the parent's and is preserved**, because the first entry is what the
-    /// dialog pre-selects: reordering the list is how you change the one-keystroke default.
+    /// Drawn ascending, and written ascending by Settings (sort-grant-amounts, 2026-10-06);
+    /// there is no pre-selected entry.
     /// Read it through ``extensionChoices``, never directly.
     public var extensionOptions: [Int] = Config.defaultExtensionOptions
 
@@ -64,8 +64,9 @@ public struct Config: Codable, Equatable, Sendable {
     /// prevent, and the only way out of it is the reboot in `RECOVERY.md`.
     public var isConfigured: Bool { !pinHash.isEmpty && pinSaltData != nil }
 
-    /// ``extensionOptions`` as the dialog should draw it: positive, no duplicates, in the
-    /// parent's own order, and **never empty**.
+    /// ``extensionOptions`` as the dialog should draw it: positive, no duplicates, ascending,
+    /// and **never empty**. Ascending whatever order the file holds (sort-grant-amounts,
+    /// 2026-10-06): a parent who adds 5 to `[15, 30, 60]` expects `+5` first, not last.
     ///
     /// The empty case is the one that matters. Nothing validates `config.json` (T03 finding),
     /// so `[]` or `[0, -30]` is one hand-edit away — and a `Dodaj minuty…` dialog with no
@@ -74,7 +75,7 @@ public struct Config: Codable, Equatable, Sendable {
     public var extensionChoices: [Int] {
         var seen = Set<Int>()
         let cleaned = extensionOptions.filter { $0 > 0 && seen.insert($0).inserted }
-        return cleaned.isEmpty ? Self.defaultExtensionOptions : cleaned
+        return cleaned.isEmpty ? Self.defaultExtensionOptions : cleaned.sorted()
     }
 
     /// Paired means both an endpoint to reach and a token to reach it with. Derived, not

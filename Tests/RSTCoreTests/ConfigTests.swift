@@ -223,13 +223,17 @@ struct ConfigTests {
         #expect(config.extensionChoices == [15, 30, 60])
     }
 
-    /// **Order is the parent's**, because the first entry is what the dialog pre-selects.
-    /// Sorting it here would quietly take that away.
-    @Test("the parent's order survives, and duplicates do not")
-    func choicesKeepOrderAndDropDuplicates() {
+    /// Ascending whatever order the file holds (sort-grant-amounts): a parent who appends 5
+    /// and 10 to the shipped list sees `+5` first.
+    @Test("the amounts come out ascending, without duplicates or non-positives",
+          arguments: [([15, 30, 60, 5, 10], [5, 10, 15, 30, 60]),
+                      ([60, 15, 30], [15, 30, 60]),
+                      ([45, 5, 90], [5, 45, 90]),
+                      ([60, 15, 60, 0, 30, -5, 15], [15, 30, 60])])
+    func choicesAreSortedWithoutDuplicates(stored: [Int], drawn: [Int]) {
         var config = Config()
-        config.extensionOptions = [60, 15, 60, 0, 30, -5, 15]
-        #expect(config.extensionChoices == [60, 15, 30])
+        config.extensionOptions = stored
+        #expect(config.extensionChoices == drawn)
     }
 
     /// §2.5 unchanged in substance: the app still never argues with an amount its owner

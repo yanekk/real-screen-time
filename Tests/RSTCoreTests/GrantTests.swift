@@ -128,19 +128,16 @@ struct GrantTests {
 
     // MARK: - What the dialog offers
 
-    /// The shipped list, in order, with the first entry pre-selected — which is the parent's
-    /// one-keystroke default (DESIGN §2.5).
-    @Test("the amounts are the config's, in the config's order, first one selected")
+    /// The config's amounts, ascending whatever order they were typed in (sort-grant-amounts).
+    @Test("the amounts are the config's, ascending")
     func grantOffersTheConfiguredAmounts() {
         var config = Config()
         #expect(GrantModel(config: config).amounts == [15, 30, 60])
-        #expect(GrantModel(config: config).preselected == 0)
-        #expect(GrantModel(config: config).defaultAmount == 15)
 
-        // Reordering the list is how the default changes. Not sorted, not normalised.
+        config.extensionOptions = [15, 30, 60, 5, 10]
+        #expect(GrantModel(config: config).amounts == [5, 10, 15, 30, 60])
         config.extensionOptions = [45, 5, 90]
-        #expect(GrantModel(config: config).amounts == [45, 5, 90])
-        #expect(GrantModel(config: config).defaultAmount == 45)
+        #expect(GrantModel(config: config).amounts == [5, 45, 90])
     }
 
     /// **A grant dialog with no amounts on it is a PIN prompt that can grant nothing**, and
@@ -153,16 +150,14 @@ struct GrantTests {
             config.extensionOptions = edited
             let model = GrantModel(config: config)
             #expect(model.amounts == Config.defaultExtensionOptions, "\(edited)")
-            #expect(model.defaultAmount == 15, "\(edited)")
         }
     }
 
-    @Test("duplicates go and the parent's order stays")
+    @Test("duplicates go and the rest is ascending")
     func grantDropsDuplicates() {
         var config = Config()
         config.extensionOptions = [30, 15, 30, -1, 15, 60]
-        #expect(GrantModel(config: config).amounts == [30, 15, 60])
-        #expect(GrantModel(config: config).defaultAmount == 30)
+        #expect(GrantModel(config: config).amounts == [15, 30, 60])
     }
 
     // MARK: - Dodaj minuty

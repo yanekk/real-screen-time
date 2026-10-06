@@ -51,7 +51,7 @@ struct CoverButtonStyleHeadedTests {
                                             CoverContentView.logoutConfirmID: .warning])
     }
 
-    @Test("the cover's PIN and amount steps: first amount blue, the rest and Anuluj grey")
+    @Test("the cover's PIN and amount steps: every amount and Anuluj grey")
     func amountStepIsStyled() async throws {
         let content = CoverDrillHeadedTests.coverWithPIN(amounts: [15, 30, 60])
         content.render(CoverDrillHeadedTests.expiredModel)
@@ -66,7 +66,7 @@ struct CoverButtonStyleHeadedTests {
         let buttons = content.allButtons()
         #expect(buttons.map(\.title) == ["+15", "+30", "+60", Strings.pinCancelButton])
         #expect(buttons.map { ($0 as? CoverButton)?.role }
-                == [.primary, .neutral, .neutral, .neutral])
+                == [.neutral, .neutral, .neutral, .neutral])
     }
 
     // MARK: - What the restyle must not change

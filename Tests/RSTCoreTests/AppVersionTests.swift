@@ -8,9 +8,9 @@ import Foundation
 @Suite("App version")
 struct AppVersionTests {
 
-    @Test("current is 1.2.0")
+    @Test("current is 1.2.1")
     func current() {
-        #expect(AppVersion.current == "1.2.0")
+        #expect(AppVersion.current == "1.2.1")
     }
 
     @Test("orders the release line ascending")

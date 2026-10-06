@@ -98,39 +98,21 @@ public struct PINGate: Equatable, Sendable {
     public func isOpen(at now: Date) -> Bool { wait(at: now) == 0 }
 }
 
-/// **What `Dodaj minuty…` offers, and which amount it starts on** (DESIGN §2.5, T13).
+/// **What `Dodaj minuty…` offers** (DESIGN §2.5, T13).
 ///
-/// One line of rule and it is still worth a type: the pre-selection *is* the parent's
-/// one-keystroke default — `Dodaj minuty…` ▸ PIN ▸ Enter grants the first entry with no
-/// further choice — so which entry that is, and that reordering the list is how it changes,
-/// is a property `make test` should be able to state. The alternative is a `.first!` in a
-/// view, on a list off a hand-edited `config.json`.
+/// There is no pre-selected amount and Enter grants nothing (sort-grant-amounts,
+/// 2026-10-06): the list is drawn ascending, so its first entry no longer says anything
+/// about the parent's usual choice.
 ///
 /// The amounts come through ``Config/extensionChoices``, never `extensionOptions` directly:
 /// that is where the non-positives, the duplicates and the empty list are dealt with, and a
 /// grant dialog with no amounts on it is a PIN prompt that can grant nothing.
 public struct GrantModel: Equatable, Sendable {
 
-    /// In the parent's own order, drawn as given. **Never empty.**
+    /// Ascending, drawn as given. **Never empty.**
     public let amounts: [Int]
-
-    /// The index the dialog opens on. Always `0` — stated as a property rather than left
-    /// implicit so that "the first entry is pre-selected" is asserted somewhere.
-    public let preselected: Int
 
     public init(config: Config) {
         amounts = config.extensionChoices
-        preselected = 0
-    }
-
-    /// The amount a parent gets by pressing Enter twice.
-    ///
-    /// Non-optional: ``Config/extensionChoices`` guarantees a non-empty list, and this is
-    /// the one place that guarantee is worth restating — the fallback is the shipped list
-    /// rather than a crash on an empty array.
-    public var defaultAmount: Int {
-        amounts.indices.contains(preselected)
-            ? amounts[preselected]
-            : (Config.defaultExtensionOptions.first ?? 15)
     }
 }

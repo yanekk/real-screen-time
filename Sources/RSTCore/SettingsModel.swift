@@ -218,7 +218,9 @@ public struct SettingsDraft: Equatable, Sendable {
         self.extensionOptions = extensionOptions
     }
 
-    /// What the window opens with: whatever is on disk, **exactly** as it is on disk.
+    /// What the window opens with: whatever is on disk, with the grant amounts sorted
+    /// (sort-grant-amounts, 2026-10-06), so the field reads in the order the dialog draws.
+    /// Sorting keeps a duplicate or a non-positive in place for ``problem`` to refuse.
     ///
     /// `extensionOptions` rather than ``Config/extensionChoices``, and that is the point of
     /// the distinction. `extensionChoices` is the *repaired* list the dialog draws — a
@@ -232,7 +234,7 @@ public struct SettingsDraft: Equatable, Sendable {
                   idleGraceSeconds: config.idleGraceSeconds,
                   mediaGraceSeconds: config.mediaGraceSeconds,
                   warningMinutes: config.warningMinutes,
-                  extensionOptions: config.extensionOptions)
+                  extensionOptions: config.extensionOptions.sorted())
     }
 
     /// The two numbers T16's wizard asks for, so the rule behind them is one rule.
@@ -302,7 +304,8 @@ extension Config {
         updated.idleGraceSeconds = draft.idleGraceSeconds
         updated.mediaGraceSeconds = draft.mediaGraceSeconds
         updated.warningMinutes = draft.warningMinutes
-        updated.extensionOptions = draft.extensionOptions
+        // Sorted so `config.json` matches what the field and the dialog show.
+        updated.extensionOptions = draft.extensionOptions.sorted()
         return updated
     }
 

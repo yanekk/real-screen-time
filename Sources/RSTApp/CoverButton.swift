@@ -16,9 +16,9 @@ import AppKit
 final class CoverButton: NSButton {
 
     enum Role {
-        /// The face's way forward: `Wprowadź PIN`, `Rozpocznij`, `Wznów`, the first amount.
+        /// The face's way forward: `Wprowadź PIN`, `Rozpocznij`, `Wznów`.
         case primary
-        /// `Zablokuj ekran`, `Anuluj`, the other amounts.
+        /// `Zablokuj ekran`, `Anuluj`, every amount.
         case neutral
         /// `Wyloguj`, on the face and on the confirmation.
         case warning

@@ -335,9 +335,8 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         add([Self.sectionTitle("Grants")])
         add([field(grantsField, "Amounts offered by “Dodaj minuty…”", "minutes"),
              Self.note("""
-                 In the order you want them offered — the first one is pre-selected, so putting \
-                 your usual amount first makes it one keystroke. There is no upper limit and the \
-                 list may not be empty.
+                 Shown smallest first, whatever order you type them in. There is no upper limit \
+                 and the list may not be empty.
                  """)])
 
         add([Self.sectionTitle("Detection")])
@@ -1085,7 +1084,7 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
 /// unit is the trailing label beside the field, not part of the pill.
 ///
 /// **The two lists are not the same shape** (DESIGN §2.6). Grants (`extension_options`) may
-/// never be empty — the first is pre-selected in `Dodaj minuty…`, and an empty list is the one
+/// never be empty — an empty list is the one
 /// thing ``SettingsDraft/problem`` forbids — so the grant field refuses to delete its last
 /// token. Warnings may be emptied freely. `keepAtLeastOne` is that difference.
 ///

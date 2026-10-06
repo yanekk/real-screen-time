@@ -385,22 +385,22 @@ final class PINFlow: NSObject {
 
     // MARK: - Stage two: the amount
 
-    /// `Dodaj minuty` — one button per entry of `config.extensionChoices`, in the parent's
-    /// own order (DESIGN §2.5). ``GrantModel`` owns the list and its fallback.
+    /// `Dodaj minuty` — one button per entry of `config.extensionChoices`, ascending
+    /// (sort-grant-amounts). ``GrantModel`` owns the list and its fallback.
     ///
     /// **One press grants** (cover-buttons-logout DESIGN §2.1), replacing radios plus a
     /// `Dodaj` confirm. No confirmation: the parent has just typed the PIN, so the mis-tap a
     /// confirm would guard against has already been guarded against.
+    ///
+    /// **No amount answers Return and none is drawn primary** (sort-grant-amounts,
+    /// 2026-10-06): with the list sorted, the first amount is not a choice anybody made, so
+    /// nothing may look like a default or be granted by Enter.
     private func buildAmounts() {
         let model = GrantModel(config: config())
         var amounts: [NSButton] = []
-        for (index, amount) in model.amounts.enumerated() {
+        for amount in model.amounts {
             let amountButton = button(Strings.grantAmountButton(amount),
-                                      #selector(amountPressed(_:)),
-                                      // Enter grants the first amount, as it granted the
-                                      // pre-selected radio before. `make ui-gate`'s
-                                      // `right-pin` scenario presses Return and relies on it.
-                                      primary: index == model.preselected)
+                                      #selector(amountPressed(_:)))
             amountButton.tag = amount
             amountButton.setAccessibilityIdentifier("amount-\(amount)")
             amounts.append(amountButton)
@@ -457,13 +457,11 @@ final class PINFlow: NSObject {
         return row
     }
 
-    private func button(_ title: String, _ selector: Selector,
-                        primary: Bool = false) -> NSButton {
+    private func button(_ title: String, _ selector: Selector) -> NSButton {
         // The cover's style, here too: the parent chose the menu-bar panel to follow the
         // cover (T05, 2026-10-03), so there is one look and one code path for this step.
-        let button = CoverButton(title: title, role: primary ? .primary : .neutral,
+        let button = CoverButton(title: title, role: .neutral,
                                  fontSize: 16 * scale, target: self, action: selector)
-        if primary { button.keyEquivalent = "\r" }
         return button
     }
 }

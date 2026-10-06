@@ -113,9 +113,8 @@ struct PINFlowHeadedTests {
             for button in flow.view.allDescendants(of: NSButton.self) {
                 #expect(!Self.isRadio(button), "‘\(button.title)’ is a radio button")
                 // The cover's style, in the panel too (T05: the parent chose it to follow).
-                #expect((button as? CoverButton)?.role
-                        == (button.title == "+15" ? .primary : .neutral),
-                        "‘\(button.title)’")
+                // All neutral: no amount is a default (sort-grant-amounts).
+                #expect((button as? CoverButton)?.role == .neutral, "‘\(button.title)’")
             }
             for amount in [15, 30, 60] {
                 let button = Self.button("+\(amount)", in: flow)
@@ -162,31 +161,31 @@ struct PINFlowHeadedTests {
         }
     }
 
-    /// The parent's own list, in the parent's order. Above three amounts the buttons stack
-    /// vertically so a long list does not run off a 600×400 boxed cover; only the first
-    /// carries Return.
-    @Test("config [10, 20, 45, 90]: four buttons in order, vertical, only the first on Return")
-    func customAmountsVerticalFirstOnReturn() {
+    /// The parent's list, ascending whatever order it was typed in (sort-grant-amounts).
+    /// Above three amounts the buttons stack vertically so a long list does not run off a
+    /// 600×400 boxed cover; none carries Return.
+    @Test("config [15, 30, 60, 5, 10]: five buttons ascending, vertical, none on Return")
+    func customAmountsVerticalAscending() {
         HeadedHarness.withApp { _ in
             var config = Self.configuredPIN()
-            config.extensionOptions = [10, 20, 45, 90]
+            config.extensionOptions = [15, 30, 60, 5, 10]
             let flow = Self.makeFlow(.extend, config: config,
                                      verifier: ScriptedVerifier(accept: true))
             Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
 
             let amounts = Self.amountButtons(in: flow)
-            #expect(amounts.map(\.title) == ["+10", "+20", "+45", "+90"])
-            #expect(amounts.map(\.tag) == [10, 20, 45, 90])
+            #expect(amounts.map(\.title) == ["+5", "+10", "+15", "+30", "+60"])
+            #expect(amounts.map(\.tag) == [5, 10, 15, 30, 60])
             let grid = amounts.first?.superview as? NSStackView
             #expect(grid?.orientation == .vertical)
-            #expect(amounts.map(\.keyEquivalent) == ["\r", "", "", ""])
-            // Anuluj does not answer Return either: Enter grants, it never cancels.
+            #expect(amounts.allSatisfy { $0.keyEquivalent.isEmpty })
+            #expect(amounts.allSatisfy { ($0 as? CoverButton)?.role == .neutral })
             #expect(Self.button(Strings.pinCancelButton, in: flow)?.keyEquivalent == "")
         }
     }
 
-    /// Three or fewer amounts sit in one horizontal row; the first carries Return there too.
-    @Test("the default three amounts sit in a horizontal row, first on Return")
+    /// Three or fewer amounts sit in one horizontal row; none carries Return there either.
+    @Test("the default three amounts sit in a horizontal row, none on Return")
     func defaultAmountsHorizontal() {
         HeadedHarness.withApp { _ in
             let flow = Self.makeFlow(.extend, verifier: ScriptedVerifier(accept: true))
@@ -194,7 +193,25 @@ struct PINFlowHeadedTests {
 
             let amounts = Self.amountButtons(in: flow)
             #expect((amounts.first?.superview as? NSStackView)?.orientation == .horizontal)
-            #expect(amounts.map(\.keyEquivalent) == ["\r", "", ""])
+            #expect(amounts.map(\.keyEquivalent) == ["", "", ""])
+        }
+    }
+
+    /// **Enter grants nothing on the amount step** (sort-grant-amounts): with the list
+    /// sorted, the first amount is not a choice, so Return must not pick it.
+    @Test("Return on the amount step completes nothing")
+    func returnOnAmountStepGrantsNothing() {
+        HeadedHarness.withApp { _ in
+            var outcomes: [PINFlow.Outcome] = []
+            let flow = Self.makeFlow(.extend, verifier: ScriptedVerifier(accept: true)) {
+                outcomes.append($0)
+            }
+            let window = CoverDrillHeadedTests.window(holding: flow.view)
+            Self.type("1379", into: try! #require(flow.keyboardTarget as? PINBoxes))
+            #expect(!Self.amountButtons(in: flow).isEmpty)
+
+            _ = window.performKeyEquivalent(with: CoverDrillHeadedTests.key("\r", code: 36))
+            #expect(outcomes.isEmpty)
         }
     }
 
